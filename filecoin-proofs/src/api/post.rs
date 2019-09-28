@@ -255,6 +255,128 @@ pub fn generate_post(
     Ok(proof.to_vec())
 }
 
+pub fn generate_post_first(
+    post_config: PoStConfig,
+    challenge_seed: &ChallengeSeed,
+    sectors: OrderedSectorSet,
+    faults: OrderedSectorSet,
+) -> error::Result<Vec<rational_post::Challenge>> {
+    let sector_size = u64::from(PaddedBytesAmount::from(post_config));
+
+    let vanilla_params = post_setup_params(post_config);
+
+    rational_post::derive_challenges(
+        vanilla_params.challenges_count,
+        sector_size,
+        &sectors,
+        challenge_seed,
+        &faults,
+    )
+}
+
+pub fn generate_post_second(
+    post_config: PoStConfig,
+    challenges: &Vec<rational_post::Challenge>,
+    replicas: &BTreeMap<SectorId, PrivateReplicaInfo>,
+    faults: Vec<SectorId>,
+) -> error::Result<Vec<u8>> {
+    let sector_count = replicas.len() as u64;
+    let sector_size = u64::from(PaddedBytesAmount::from(post_config));
+
+    let vanilla_params = post_setup_params(post_config);
+    let setup_params = compound_proof::SetupParams {
+        vanilla_params: &vanilla_params,
+        engine_params: &(*ENGINE_PARAMS),
+        partitions: None,
+    };
+
+    let pub_params: compound_proof::PublicParams<_, rational_post::RationalPoSt<PedersenHasher>> =
+        RationalPoStCompound::setup(&setup_params)?;
+
+    let faults = faults.into_iter().collect();
+
+    // Match the replicas to the challenges, as these are the only ones required.
+    let challenged_replicas: Vec<_> = challenges
+        .iter()
+        .map(|c| {
+            if let Some(replica) = replicas.get(&c.sector) {
+                Ok((c.sector, replica))
+            } else {
+                Err(format_err!(
+                    "Invalid challenge generated: {}, only {} sectors are being proven",
+                    c.sector,
+                    sector_count
+                ))
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    // Generate merkle trees for the challenged replicas.
+    // Merkle trees should be generated only once, not multiple times if the same sector is challenged
+    // multiple times, so we build a HashMap of trees.
+
+    let mut unique_challenged_replicas = challenged_replicas.clone();
+    unique_challenged_replicas.sort_unstable(); // dedup requires a sorted list
+    unique_challenged_replicas.dedup();
+
+    let unique_trees_res: Vec<_> = unique_challenged_replicas
+        .into_par_iter()
+        .map(|(id, replica)| replica.merkle_tree(sector_size).map(|tree| (id, tree)))
+        .collect();
+
+    // resolve results
+    let unique_trees: BTreeMap<SectorId, Tree> =
+        unique_trees_res.into_iter().collect::<Result<_, _>>()?;
+
+    let borrowed_trees: BTreeMap<SectorId, &Tree> = challenged_replicas
+        .iter()
+        .map(|(id, _)| {
+            if let Some(tree) = unique_trees.get(id) {
+                Ok((*id, tree))
+            } else {
+                Err(format_err!(
+                    "Bug: Failed to generate merkle tree for {} sector",
+                    id
+                ))
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    // Construct the list of actual commitments
+    let comm_rs: Vec<_> = challenged_replicas
+        .iter()
+        .map(|(_id, replica)| replica.safe_comm_r())
+        .collect::<Result<_, _>>()?;
+
+    let comm_cs: Vec<_> = challenged_replicas
+        .iter()
+        .map(|(_id, replica)| replica.safe_comm_c())
+        .collect::<Result<_, _>>()?;
+
+    let comm_r_lasts: Vec<_> = challenged_replicas
+        .iter()
+        .map(|(_id, replica)| replica.safe_comm_r_last())
+        .collect::<Result<_, _>>()?;
+
+    let pub_inputs = rational_post::PublicInputs {
+        challenges: &challenges,
+        comm_rs: &comm_rs,
+        faults: &faults,
+    };
+
+    let priv_inputs = rational_post::PrivateInputs::<PedersenHasher> {
+        trees: &borrowed_trees,
+        comm_cs: &comm_cs,
+        comm_r_lasts: &comm_r_lasts,
+    };
+
+    let groth_params = get_post_params(post_config)?;
+
+    let proof = RationalPoStCompound::prove(&pub_params, &pub_inputs, &priv_inputs, &groth_params)?;
+
+    Ok(proof.to_vec())
+}
+
 /// Verifies a proof-of-spacetime.
 pub fn verify_post(
     post_config: PoStConfig,
