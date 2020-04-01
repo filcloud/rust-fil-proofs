@@ -8,6 +8,7 @@ use bincode::deserialize;
 use log::{info, trace};
 use merkletree::merkle::get_merkle_tree_leafs;
 use merkletree::store::{ExternalReader, LevelCacheStore, StoreConfig};
+pub use merkletree::store::NetReader;
 use paired::bls12_381::Bls12;
 use rayon::prelude::*;
 use storage_proofs::cache_key::CacheKey;
@@ -82,6 +83,24 @@ impl PrivateReplicaInfo {
         })
     }
 
+    pub fn new_only_comm_r(comm_r: Commitment) -> Result<Self> {
+        ensure!(comm_r != [0; 32], "Invalid all zero commitment (comm_r)");
+
+        Ok(PrivateReplicaInfo {
+            replica: PathBuf::default(),
+            comm_r,
+            aux: PersistentAux::default(),
+            cache_dir: PathBuf::default(),
+        })
+    }
+
+    pub fn get_aux(&self, net_reader: NetReader, sector_id: u64) -> Result<PersistentAux> {
+        let mut aux_bytes = vec![0; 1024];
+        let size = net_reader.net_read(sector_id, CacheKey::PAux.to_string(), 0, u64::max_value(), &mut aux_bytes)?;
+        let aux: PersistentAux = deserialize(&aux_bytes[..size])?;
+        Ok(aux)
+    }
+
     pub fn cache_dir_path(&self) -> &Path {
         self.cache_dir.as_path()
     }
@@ -103,7 +122,7 @@ impl PrivateReplicaInfo {
     }
 
     /// Generate the merkle tree of this particular replica.
-    pub fn merkle_tree(&self, tree_size: usize, tree_leafs: usize) -> Result<LCTree> {
+    pub fn merkle_tree(&self, tree_size: usize, tree_leafs: usize, net_reader: NetReader) -> Result<LCTree> {
         trace!(
             "post: tree size {}, tree leafs {}, cached above base {}",
             tree_size,
@@ -117,12 +136,15 @@ impl PrivateReplicaInfo {
         );
         config.size = Some(tree_size);
 
-        let tree_r_last_store: LevelCacheStore<<DefaultTreeHasher as Hasher>::Domain, _> =
-            LevelCacheStore::new_from_disk_with_reader(
+        let mut net_reader = net_reader.clone();
+        net_reader.cache_id = config.id.clone();
+
+        let mut tree_r_last_store: LevelCacheStore<<DefaultTreeHasher as Hasher>::Domain, _> =
+            LevelCacheStore::new_from_disk_with_net_reader(
                 tree_size,
                 OCT_ARITY,
                 &config,
-                ExternalReader::new_from_path(&self.replica_path().to_path_buf())?,
+                net_reader,
             )?;
         let tree_r_last = OctLCMerkleTree::from_data_store(tree_r_last_store, tree_leafs)?;
 
@@ -187,6 +209,16 @@ pub fn clear_caches(replicas: &BTreeMap<SectorId, PrivateReplicaInfo>) -> Result
     Ok(())
 }
 
+pub fn generate_candidates(
+    post_config: PoStConfig,
+    randomness: &ChallengeSeed,
+    challenge_count: u64,
+    replicas: &BTreeMap<SectorId, PrivateReplicaInfo>,
+    prover_id: ProverId,
+) -> Result<Vec<Candidate>> {
+    generate_candidates_with_reader(post_config, randomness, challenge_count, replicas, prover_id, NetReader::default())
+}
+
 /// Generates proof-of-spacetime candidates for ElectionPoSt.
 ///
 /// # Arguments
@@ -197,12 +229,13 @@ pub fn clear_caches(replicas: &BTreeMap<SectorId, PrivateReplicaInfo>) -> Result
 /// * `challenge_count` - the number sector challenges in this post.
 /// * `replicas` - each sector's sector-id and associated replica info.
 /// * `prover_id` - the prover-id that is generating this post.
-pub fn generate_candidates(
+pub fn generate_candidates_with_reader(
     post_config: PoStConfig,
     randomness: &ChallengeSeed,
     challenge_count: u64,
     replicas: &BTreeMap<SectorId, PrivateReplicaInfo>,
     prover_id: ProverId,
+    net_reader: NetReader,
 ) -> Result<Vec<Candidate>> {
     info!("generate_candidates:start");
 
@@ -260,8 +293,10 @@ pub fn generate_candidates(
     let unique_trees_res: Vec<_> = unique_challenged_replicas
         .into_par_iter()
         .map(|(id, replica)| {
+            let mut net_reader = net_reader.clone();
+            net_reader.sector_id = u64::from(*id);
             replica
-                .merkle_tree(tree_size, tree_leafs)
+                .merkle_tree(tree_size, tree_leafs, net_reader)
                 .map(|tree| (*id, tree))
         })
         .collect();
@@ -292,6 +327,16 @@ pub fn finalize_ticket(partial_ticket: &[u8; 32]) -> Result<[u8; 32]> {
     Ok(election::finalize_ticket(&partial_ticket))
 }
 
+pub fn generate_post(
+    post_config: PoStConfig,
+    randomness: &ChallengeSeed,
+    replicas: &BTreeMap<SectorId, PrivateReplicaInfo>,
+    winners: Vec<Candidate>,
+    prover_id: ProverId,
+) -> Result<Vec<SnarkProof>> {
+    generate_post_with_reader(post_config, randomness, replicas, winners, prover_id, NetReader::default())
+}
+
 /// Generates a proof-of-spacetime.
 ///
 /// # Arguments
@@ -302,12 +347,13 @@ pub fn finalize_ticket(partial_ticket: &[u8; 32]) -> Result<[u8; 32]> {
 /// * `replicas` - each sector's sector-id and associated replica info.
 /// * `winners` - a vector containing each winning ticket.
 /// * `prover_id` - the prover-id that is generating this post.
-pub fn generate_post(
+pub fn generate_post_with_reader(
     post_config: PoStConfig,
     randomness: &ChallengeSeed,
     replicas: &BTreeMap<SectorId, PrivateReplicaInfo>,
     winners: Vec<Candidate>,
     prover_id: ProverId,
+    net_reader: NetReader,
 ) -> Result<Vec<SnarkProof>> {
     info!("generate_post:start");
 
@@ -341,7 +387,10 @@ pub fn generate_post(
             let replica = replicas
                 .get(&winner.sector_id)
                 .with_context(|| format!("Missing replica for sector: {}", winner.sector_id))?;
-            let tree = replica.merkle_tree(tree_size, tree_leafs)?;
+            let mut net_reader = net_reader.clone();
+            net_reader.sector_id = u64::from(winner.sector_id);
+            let net_reader_2 = net_reader.clone();
+            let tree = replica.merkle_tree(tree_size, tree_leafs, net_reader)?;
 
             let comm_r = replica.safe_comm_r()?;
             let pub_inputs = election::PublicInputs {
@@ -353,8 +402,9 @@ pub fn generate_post(
                 prover_id: prover_id_safe,
             };
 
-            let comm_c = replica.safe_comm_c()?;
-            let comm_r_last = replica.safe_comm_r_last()?;
+            let aux = replica.get_aux(net_reader_2, u64::from(winner.sector_id))?;
+            let comm_c = aux.comm_c;
+            let comm_r_last = aux.comm_r_last;
             let priv_inputs = election::PrivateInputs::<DefaultTreeHasher> {
                 tree,
                 comm_c,
