@@ -287,48 +287,68 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         let mut label_configs: Vec<StoreConfig> = Vec::with_capacity(layers);
 
         let layer_size = graph.size() * NODE_SIZE;
-        // NOTE: this means we currently keep 2x sector size around, to improve speed.
-        let mut labels_buffer = vec![0u8; 2 * layer_size];
+
+        let mut exp_layer_store: Option<DiskStore<<Tree::Hasher as Hasher>::Domain>> = None;
+        let mut exp_labels: Option<memmap::MmapMut> = None;
 
         for layer in 1..=layers {
             info!("generating layer: {}", layer);
-
-            if layer == 1 {
-                let layer_labels = &mut labels_buffer[..layer_size];
-                for node in 0..graph.size() {
-                    create_label(graph, replica_id, layer_labels, node)?;
-                }
-            } else {
-                let (layer_labels, exp_labels) = labels_buffer.split_at_mut(layer_size);
-                for node in 0..graph.size() {
-                    create_label_exp(graph, replica_id, exp_labels, layer_labels, node)?;
-                }
-            }
-
-            info!("  setting exp parents");
-            labels_buffer.copy_within(..layer_size, layer_size);
 
             // Write the result to disk to avoid keeping it in memory all the time.
             let layer_config =
                 StoreConfig::from_config(&config, CacheKey::label_layer(layer), Some(graph.size()));
 
-            info!("  storing labels on disk");
-            // Construct and persist the layer data.
-            let layer_store: DiskStore<<Tree::Hasher as Hasher>::Domain> =
-                DiskStore::new_from_slice_with_config(
+            let layer_store =
+                DiskStore::new_for_mmap_with_config(
                     graph.size(),
                     Tree::Arity::to_usize(),
-                    &labels_buffer[..layer_size],
                     layer_config.clone(),
+                    layer_size,
                 )?;
+
+            let mut layer_labels = unsafe {
+                memmap::MmapOptions::new()
+                    .map_mut(&layer_store.file)?
+            };
+
+            unsafe {
+                region::lock(layer_labels.as_ptr(), layer_labels.len())?.release();
+            }
+
+            if layer == 1 {
+                for node in 0..graph.size() {
+                    create_label(graph, replica_id, layer_labels.as_mut(), node)?;
+                }
+            } else {
+                let exp_labels = exp_labels.as_ref().unwrap().as_ref();
+                for node in 0..graph.size() {
+                    create_label_exp(graph, replica_id, exp_labels, layer_labels.as_mut(), node)?;
+                }
+
+                unsafe {
+                    region::unlock(exp_labels.as_ptr(), exp_labels.len())?;
+                }
+            }
+
+            info!("  setting exp parents");
+            exp_layer_store = Some(layer_store);
+            exp_labels = Some(layer_labels);
+
             info!(
                 "  generated layer {} store with id {}",
                 layer, layer_config.id
             );
 
             // Track the layer specific store and StoreConfig for later retrieval.
-            labels.push(layer_store);
+            labels.push(exp_layer_store.unwrap());
             label_configs.push(layer_config);
+        }
+
+        if exp_labels.is_some() {
+            let exp_labels = exp_labels.as_ref().unwrap().as_ref();
+            unsafe {
+                region::unlock(exp_labels.as_ptr(), exp_labels.len())?;
+            }
         }
 
         assert_eq!(
