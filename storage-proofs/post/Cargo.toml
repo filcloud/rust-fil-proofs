@@ -11,7 +11,7 @@ readme = "README.md"
 [dependencies]
 storage-proofs-core = { path = "../core", version = "4.0.0" }
 rand = "0.7"
-merkletree = "0.20.0"
+merkletree = { git = "https://github.com/filcloud/merkle_light", branch ="filcloud-11" }
 byteorder = "1"
 sha2 = { version = "0.8.3", package = "sha2ni" }
 rayon = "1.0.0"
@@ -27,6 +27,9 @@ hex = "0.4.0"
 generic-array = "0.13.2"
 anyhow = "1.0.23"
 neptune = { version = "1.0.1", features = ["gpu"] }
+serde_json = "1.0"
+libc = "0.2.58"
+itertools = "0.9"
 
 [dev-dependencies]
 tempdir = "0.3.7"

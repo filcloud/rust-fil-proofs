@@ -10,6 +10,7 @@ use crate::multi_proof::MultiProof;
 use crate::parameter_cache::{CacheableParameters, ParameterSetMetadata};
 use crate::partitions;
 use crate::proof::ProofScheme;
+use crate::proof::MerkleTreeProofCallback;
 
 #[derive(Clone)]
 pub struct SetupParams<'a, S: ProofScheme<'a>> {
@@ -63,12 +64,22 @@ where
         }
     }
 
-    /// prove is equivalent to ProofScheme::prove.
     fn prove<'b>(
         pub_params: &PublicParams<'a, S>,
         pub_in: &S::PublicInputs,
         priv_in: &S::PrivateInputs,
         groth_params: &'b groth16::MappedParameters<Bls12>,
+    ) -> Result<MultiProof<'b>> {
+        Self::prove_with_callback(pub_params, pub_in, priv_in, groth_params, None)
+    }
+
+    /// prove is equivalent to ProofScheme::prove.
+    fn prove_with_callback<'b>(
+        pub_params: &PublicParams<'a, S>,
+        pub_in: &S::PublicInputs,
+        priv_in: &S::PrivateInputs,
+        groth_params: &'b groth16::MappedParameters<Bls12>,
+        tree_cb: Option<MerkleTreeProofCallback>,
     ) -> Result<MultiProof<'b>> {
         let partition_count = Self::partition_count(pub_params);
 
@@ -76,11 +87,12 @@ where
         ensure!(partition_count > 0, "There must be partitions");
 
         info!("vanilla_proof:start");
-        let vanilla_proofs = S::prove_all_partitions(
+        let vanilla_proofs = S::prove_all_partitions_with_callback(
             &pub_params.vanilla_params,
             &pub_in,
             priv_in,
             partition_count,
+            tree_cb,
         )?;
 
         info!("vanilla_proof:finish");
@@ -100,6 +112,16 @@ where
         info!("snark_proof:finish");
 
         Ok(MultiProof::new(groth_proofs, &groth_params.vk))
+    }
+
+    fn tree_prove<'b>(
+        pub_params: &PublicParams<'a, S>,
+        pub_in: &S::PublicInputs,
+        priv_in: &S::PrivateInputs,
+        ji: &[(usize, usize)],
+        num_sectors_per_chunk: usize,
+    ) -> Result<String> {
+        S::tree_prove(&pub_params.vanilla_params, pub_in, priv_in, ji, num_sectors_per_chunk)
     }
 
     // verify is equivalent to ProofScheme::verify.
