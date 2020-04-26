@@ -4,10 +4,13 @@ use anyhow::ensure;
 use byteorder::{ByteOrder, LittleEndian};
 use generic_array::typenum::Unsigned;
 use log::trace;
+use log::warn;
+use merkletree::store::StoreConfig;
 use paired::bls12_381::Fr;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use itertools::izip;
 
 use storage_proofs_core::{
     error::Result,
@@ -267,11 +270,12 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
         Ok(proofs[k].to_owned())
     }
 
-    fn prove_all_partitions<'b>(
+    fn prove_all_partitions_with_proofs<'b>(
         pub_params: &'b Self::PublicParams,
         pub_inputs: &'b Self::PublicInputs,
         priv_inputs: &'b Self::PrivateInputs,
         partition_count: usize,
+        proofs_str: Option<String>,
     ) -> Result<Vec<Self::Proof>> {
         ensure!(
             priv_inputs.sectors.len() == pub_inputs.sectors.len(),
@@ -292,6 +296,41 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
         );
 
         let mut partition_proofs = Vec::new();
+
+        if proofs_str.is_some() {
+            let proof = proofs_str.unwrap();
+            let all_proofs: Vec<SectorProof<Tree::Proof>> = serde_json::from_str(&proof)?;
+            ensure!(
+                all_proofs.len() == pub_inputs.sectors.len(),
+                "inconsistent number of sectors and proofs {} != {}",
+                all_proofs.len(),
+                pub_inputs.sectors.len(),
+            );
+
+            for (j, pub_sectors_chunk) in pub_inputs
+                .sectors
+                .chunks(num_sectors_per_chunk)
+                .enumerate()
+            {
+                let mut proofs = Vec::with_capacity(num_sectors_per_chunk);
+
+                for (i, _) in pub_sectors_chunk
+                    .iter()
+                    .enumerate()
+                {
+                    let proof = &all_proofs[j * num_sectors_per_chunk + i];
+                    proofs.push((*proof).clone());
+                }
+
+                while proofs.len() < num_sectors_per_chunk {
+                    proofs.push(proofs[proofs.len() - 1].clone());
+                }
+
+                partition_proofs.push(Proof { sectors: proofs });
+            }
+
+            return Ok(partition_proofs);
+        }
 
         for (j, (pub_sectors_chunk, priv_sectors_chunk)) in pub_inputs
             .sectors
@@ -353,6 +392,70 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
         }
 
         Ok(partition_proofs)
+    }
+
+    fn tree_prove(
+        pub_params: &Self::PublicParams,
+        pub_in: &Self::PublicInputs,
+        priv_in: &Self::PrivateInputs,
+        ji: &[(usize, usize)],
+        num_sectors_per_chunk: usize,
+    ) -> Result<String> {
+        ensure!(
+            priv_in.sectors.len() == pub_in.sectors.len(),
+            "inconsistent number of private and public sectors {} != {}",
+            priv_in.sectors.len(),
+            pub_in.sectors.len(),
+        );
+
+        ensure!(
+            ji.len() == pub_in.sectors.len(),
+            "inconsistent number of ji and public sectors {} != {}",
+            ji.len(),
+            pub_in.sectors.len(),
+        );
+
+        let mut proofs = Vec::<SectorProof::<Tree::Proof>>::new();
+
+        for (pub_sector, priv_sector, (j, i)) in izip!(pub_in.sectors, priv_in.sectors, ji) {
+            let tree = priv_sector.tree;
+            let sector_id = pub_sector.id;
+            let tree_leafs = tree.leafs();
+
+            trace!(
+                "Generating proof for tree leafs {} and arity {}",
+                tree_leafs,
+                Tree::Arity::to_usize(),
+            );
+
+            let inclusion_proofs = (0..pub_params.challenge_count)
+                .into_par_iter()
+                .map(|n| {
+                    let challenge_index = ((j * num_sectors_per_chunk + i)
+                        * pub_params.challenge_count
+                        + n) as u64;
+                    let challenged_leaf_start = generate_leaf_challenge(
+                        pub_params,
+                        pub_in.randomness,
+                        sector_id.into(),
+                        challenge_index,
+                    )?;
+
+                    tree.gen_cached_proof(challenged_leaf_start as usize, None)
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let proof = SectorProof::<Tree::Proof> {
+                inclusion_proofs,
+                comm_c: priv_sector.comm_c,
+                comm_r_last: priv_sector.comm_r_last,
+            };
+            proofs.push(proof);
+        }
+
+        let proofs_str = serde_json::to_string(&proofs)?;
+        warn!("tree_prove: num {}, bytes {}", proofs.len(), proofs_str.len());
+        Ok(proofs_str)
     }
 
     fn verify_all_partitions(

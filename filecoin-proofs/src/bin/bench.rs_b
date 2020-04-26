@@ -1,0 +1,34 @@
+use clap::{App, AppSettings, Arg, ArgGroup, SubCommand};
+
+#[allow(clippy::cognitive_complexity)]
+fn main() {
+    let p1_command = SubCommand::with_name("p1")
+        .about("Create initial phase2 parameters for circuit")
+        .arg(
+            Arg::with_name("sdr")
+                .long("sdr")
+                .help("Generate SDR PoRep parameters"),
+        )
+        .group(
+            ArgGroup::with_name("sector-size")
+                .args(&[
+                    "2kib", "512mib", "32gib", "64gib",
+                ])
+                .required(true)
+                .multiple(false),
+        );
+
+    let matches = App::new("bench")
+        .version("1.0")
+        .setting(AppSettings::ArgRequiredElseHelp)
+        .setting(AppSettings::SubcommandRequired)
+        .subcommand(p1_command)
+        .get_matches();
+
+    if let (subcommand, Some(matches)) = matches.subcommand() {
+        match subcommand {
+            "p1" => {
+            }
+        }
+    }
+}
