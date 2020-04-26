@@ -8,6 +8,7 @@ use bincode::deserialize;
 use generic_array::typenum::Unsigned;
 use log::{info, trace};
 use merkletree::store::StoreConfig;
+pub use merkletree::store::NetReader;
 use storage_proofs::cache_key::CacheKey;
 use storage_proofs::compound_proof::{self, CompoundProof};
 use storage_proofs::hasher::{Domain, Hasher};
@@ -110,6 +111,25 @@ impl<Tree: 'static + MerkleTreeTrait> PrivateReplicaInfo<Tree> {
         })
     }
 
+    pub fn new_only_comm_r(comm_r: Commitment) -> Result<Self> {
+        ensure!(comm_r != [0; 32], "Invalid all zero commitment (comm_r)");
+
+        Ok(PrivateReplicaInfo {
+            replica: PathBuf::default(),
+            comm_r,
+            aux: PersistentAux::default(),
+            cache_dir: PathBuf::default(),
+            _t: Default::default(),
+        })
+    }
+
+    pub fn get_aux(&self, net_reader: NetReader, sector_id: u64) -> Result<PersistentAux<<Tree::Hasher as Hasher>::Domain>> {
+        let mut aux_bytes = vec![0; 1024]; // TODO: are you sure?
+        let size = net_reader.net_read(sector_id, CacheKey::PAux.to_string(), 0, u64::max_value(), &mut aux_bytes)?;
+        let aux: PersistentAux<<Tree::Hasher as Hasher>::Domain> = deserialize(&aux_bytes[..size])?;
+        Ok(aux)
+    }
+
     pub fn cache_dir_path(&self) -> &Path {
         self.cache_dir.as_path()
     }
@@ -134,6 +154,7 @@ impl<Tree: 'static + MerkleTreeTrait> PrivateReplicaInfo<Tree> {
     pub fn merkle_tree(
         &self,
         sector_size: SectorSize,
+        net_reader: NetReader,
     ) -> Result<
         MerkleTreeWrapper<
             Tree::Hasher,
@@ -162,6 +183,9 @@ impl<Tree: 'static + MerkleTreeTrait> PrivateReplicaInfo<Tree> {
         );
         config.size = Some(base_tree_size);
 
+        let mut net_reader = net_reader.clone();
+        net_reader.cache_id = config.id.clone();
+
         let tree_count = get_base_tree_count::<Tree>();
         let (configs, replica_config) = split_config_and_replica(
             config,
@@ -170,7 +194,7 @@ impl<Tree: 'static + MerkleTreeTrait> PrivateReplicaInfo<Tree> {
             tree_count,
         )?;
 
-        create_tree::<Tree>(base_tree_size, &configs, Some(&replica_config))
+        create_tree::<Tree>(base_tree_size, &configs, Some(&replica_config), net_reader)
     }
 }
 
@@ -238,6 +262,16 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
+    generate_winning_post_with_reader(post_config, randomness, replicas, prover_id, NetReader::default())
+}
+
+pub fn generate_winning_post_with_reader<Tree: 'static + MerkleTreeTrait>(
+    post_config: &PoStConfig,
+    randomness: &ChallengeSeed,
+    replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
+    prover_id: ProverId,
+    net_reader: NetReader,
+) -> Result<SnarkProof> {
     info!("generate_winning_post:start");
     ensure!(
         post_config.typ == PoStType::Winning,
@@ -268,7 +302,11 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
 
     let trees = replicas
         .iter()
-        .map(|(_, replica)| replica.merkle_tree(post_config.sector_size))
+        .map(|(id, replica)| {
+            let mut net_reader = net_reader.clone();
+            net_reader.sector_id = u64::from(*id);
+            replica.merkle_tree(post_config.sector_size, net_reader)
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let mut pub_sectors = Vec::with_capacity(param_sector_count);
@@ -277,8 +315,10 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     for _ in 0..param_sector_count {
         for ((id, replica), tree) in replicas.iter().zip(trees.iter()) {
             let comm_r = replica.safe_comm_r()?;
-            let comm_c = replica.safe_comm_c()?;
-            let comm_r_last = replica.safe_comm_r_last()?;
+            let mut net_reader = net_reader.clone();
+            let aux = replica.get_aux(net_reader, u64::from(*id))?;
+            let comm_c = aux.comm_c;
+            let comm_r_last = aux.comm_r_last;
 
             pub_sectors.push(fallback::PublicSector::<<Tree::Hasher as Hasher>::Domain> {
                 id: *id,
@@ -430,6 +470,16 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &BTreeMap<SectorId, PrivateReplicaInfo<Tree>>,
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
+    generate_window_post_with_reader(post_config, randomness, replicas, prover_id, NetReader::default())
+}
+
+pub fn generate_window_post_with_reader<Tree: 'static + MerkleTreeTrait>(
+    post_config: &PoStConfig,
+    randomness: &ChallengeSeed,
+    replicas: &BTreeMap<SectorId, PrivateReplicaInfo<Tree>>,
+    prover_id: ProverId,
+    net_reader: NetReader,
+) -> Result<SnarkProof> {
     info!("generate_window_post:start");
     ensure!(
         post_config.typ == PoStType::Window,
@@ -455,7 +505,11 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
 
     let trees: Vec<_> = replicas
         .iter()
-        .map(|(_id, replica)| replica.merkle_tree(post_config.sector_size))
+        .map(|(id, replica)| {
+            let mut net_reader = net_reader.clone();
+            net_reader.sector_id = u64::from(*id);
+            replica.merkle_tree(post_config.sector_size, net_reader)
+        })
         .collect::<Result<_>>()?;
 
     let mut pub_sectors = Vec::with_capacity(sector_count);
@@ -463,8 +517,10 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
 
     for ((sector_id, replica), tree) in replicas.iter().zip(trees.iter()) {
         let comm_r = replica.safe_comm_r()?;
-        let comm_c = replica.safe_comm_c()?;
-        let comm_r_last = replica.safe_comm_r_last()?;
+        let mut net_reader = net_reader.clone();
+        let aux = replica.get_aux(net_reader, u64::from(*sector_id))?;
+        let comm_c = aux.comm_c;
+        let comm_r_last = aux.comm_r_last;
 
         pub_sectors.push(fallback::PublicSector {
             id: *sector_id,

@@ -9,6 +9,7 @@ use merkletree::merkle::{
     get_merkle_tree_leafs, is_merkle_tree_size_valid, FromIndexedParallelIterator,
 };
 use merkletree::store::{ExternalReader, ReplicaConfig, Store, StoreConfig};
+use merkletree::store::NetReader;
 use rayon::prelude::*;
 
 use crate::error::*;
@@ -87,6 +88,7 @@ pub fn create_tree<Tree: MerkleTreeTrait>(
     base_tree_len: usize,
     configs: &[StoreConfig],
     replica_config: Option<&ReplicaConfig>,
+    net_reader: NetReader,
 ) -> Result<
     MerkleTreeWrapper<
         <Tree as MerkleTreeTrait>::Hasher,
@@ -104,22 +106,37 @@ where
     let base_tree_leafs = get_base_tree_leafs::<Tree>(base_tree_len)?;
     let mut trees = Vec::with_capacity(configs.len());
     for i in 0..configs.len() {
-        let mut store = Tree::Store::new_with_config(
-            base_tree_len,
-            Tree::Arity::to_usize(),
-            configs[i].clone(),
-        )?;
-        if let Some(lc_store) = Any::downcast_mut::<
-            merkletree::store::LevelCacheStore<<Tree::Hasher as Hasher>::Domain, std::fs::File>,
-        >(&mut store)
-        {
-            ensure!(
-                replica_config.is_some(),
-                "Cannot create LCTree without replica paths"
-            );
+        let mut store = if net_reader.empty {
+            let mut store = Tree::Store::new_with_config(
+                base_tree_len,
+                Tree::Arity::to_usize(),
+                configs[i].clone(),
+            )?;
+            if let Some(lc_store) = Any::downcast_mut::<
+                merkletree::store::LevelCacheStore<<Tree::Hasher as Hasher>::Domain, std::fs::File>,
+            >(&mut store)
+            {
+                ensure!(
+                    replica_config.is_some(),
+                    "Cannot create LCTree without replica paths"
+                );
+                let replica_config = replica_config.unwrap();
+                lc_store.set_external_reader(ExternalReader::new_from_config(&replica_config, i)?)?;
+            }
+
+            store
+        } else {
+            let mut net_reader = net_reader.clone();
+            net_reader.cache_id = configs[i].id.clone();
             let replica_config = replica_config.unwrap();
-            lc_store.set_external_reader(ExternalReader::new_from_config(&replica_config, i)?)?;
-        }
+            net_reader.offset = replica_config.offsets[i];
+            Tree::Store::new_from_disk_with_net_reader(
+                base_tree_len,
+                Tree::Arity::to_usize(),
+                &configs[i].clone(),
+                net_reader,
+            )?
+        };
 
         if configs.len() == 1 {
             return MerkleTreeWrapper::<
