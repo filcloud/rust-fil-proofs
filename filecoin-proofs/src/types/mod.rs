@@ -67,6 +67,7 @@ pub struct SealCommitOutput {
 }
 
 pub use merkletree::store::StoreConfig;
+pub use merkletree::store::disk_lock::DISK_LOCK;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SealPreCommitPhase1Output<Tree: MerkleTreeTrait> {

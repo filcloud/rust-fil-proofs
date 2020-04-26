@@ -14,9 +14,10 @@ pub use tree::*;
 
 // Reexport here, so we don't depend on merkletree directly in other places.
 pub use merkletree::store::{ExternalReader, Store};
+pub use merkletree::store::disk_lock::LockedFile;
 
 pub type DiskStore<E> = merkletree::store::DiskStore<E>;
-pub type LCStore<E> = merkletree::store::LevelCacheStore<E, std::fs::File>;
+pub type LCStore<E> = merkletree::store::LevelCacheStore<E, LockedFile>;
 
 pub type MerkleStore<T> = DiskStore<T>;
 

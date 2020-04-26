@@ -87,6 +87,7 @@ pub fn create_tree<Tree: MerkleTreeTrait>(
     base_tree_len: usize,
     configs: &[StoreConfig],
     replica_config: Option<&ReplicaConfig>,
+    no_lock: bool,
 ) -> Result<
     MerkleTreeWrapper<
         <Tree as MerkleTreeTrait>::Hasher,
@@ -110,15 +111,16 @@ where
             configs[i].clone(),
         )?;
         if let Some(lc_store) = Any::downcast_mut::<
-            merkletree::store::LevelCacheStore<<Tree::Hasher as Hasher>::Domain, std::fs::File>,
+            merkletree::store::LevelCacheStore<<Tree::Hasher as Hasher>::Domain, LockedFile>,
         >(&mut store)
         {
+            lc_store.set_no_lock(no_lock);
             ensure!(
                 replica_config.is_some(),
                 "Cannot create LCTree without replica paths"
             );
             let replica_config = replica_config.unwrap();
-            lc_store.set_external_reader(ExternalReader::new_from_config(&replica_config, i)?)?;
+            lc_store.set_external_reader(ExternalReader::new_from_config_with_lock(&replica_config, i, no_lock)?)?;
         }
 
         if configs.len() == 1 {
@@ -418,6 +420,7 @@ where
 
         // Write out the replica data.
         let mut f = std::fs::File::create(&replica_path).unwrap();
+        let mut f = LockedFile::new(f);
         f.write_all(&data).unwrap();
 
         {
@@ -430,7 +433,7 @@ where
                     <Tree::Hasher as Hasher>::Function,
                     merkletree::store::LevelCacheStore<
                         <Tree::Hasher as Hasher>::Domain,
-                        std::fs::File,
+                        LockedFile,
                     >,
                     Tree::Arity,
                     Tree::SubTreeArity,

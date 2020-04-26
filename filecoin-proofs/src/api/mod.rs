@@ -36,6 +36,7 @@ pub use self::post::*;
 pub use self::seal::*;
 
 use storage_proofs::pieces::generate_piece_commitment_bytes_from_source;
+use merkletree::store::disk_lock::LockedFile;
 
 /// Unseals the sector at `sealed_path` and returns the bytes for a piece
 /// whose first (unpadded) byte begins at `offset` and ends at `offset` plus
@@ -351,7 +352,7 @@ fn verify_level_cache_store<Tree: MerkleTreeTrait>(config: &StoreConfig) -> Resu
         let store_len = config.size.unwrap();
         for config in &configs {
             ensure!(
-                LevelCacheStore::<DefaultPieceDomain, std::fs::File>::is_consistent(
+                LevelCacheStore::<DefaultPieceDomain, LockedFile>::is_consistent(
                     store_len,
                     Tree::Arity::to_usize(),
                     &config,
@@ -362,7 +363,7 @@ fn verify_level_cache_store<Tree: MerkleTreeTrait>(config: &StoreConfig) -> Resu
         }
     } else {
         ensure!(
-            LevelCacheStore::<DefaultPieceDomain, std::fs::File>::is_consistent(
+            LevelCacheStore::<DefaultPieceDomain, LockedFile>::is_consistent(
                 config.size.unwrap(),
                 Tree::Arity::to_usize(),
                 &config,

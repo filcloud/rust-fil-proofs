@@ -40,10 +40,10 @@ where
     static INSTANCE_64_GIB: OnceCell<ParentCache> = OnceCell::new();
 
     const NODE_GIB: u32 = (1024 * 1024 * 1024) / NODE_SIZE as u32;
-    ensure!(
+    /* ensure!(
         ((cache_entries == 32 * NODE_GIB) || (cache_entries == 64 * NODE_GIB)),
         "Cache is only available for 32GiB and 64GiB sectors"
-    );
+    ); */
     info!("using parent_cache[{}]", cache_entries);
     if cache_entries == 32 * NODE_GIB {
         Ok(INSTANCE_32_GIB.get_or_init(|| {
