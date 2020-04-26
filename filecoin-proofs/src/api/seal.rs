@@ -2,6 +2,7 @@ use std::fs::{self, metadata, File, OpenOptions};
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
+use positioned_io::{Size};
 use anyhow::{ensure, Context, Result};
 use bincode::{deserialize, serialize};
 use log::{info, trace};
@@ -17,7 +18,7 @@ use storage_proofs::merkle::{create_base_merkle_tree, BinaryMerkleTree, MerkleTr
 use storage_proofs::multi_proof::MultiProof;
 use storage_proofs::porep::stacked::{
     self, generate_replica_id, ChallengeRequirements, StackedCompound, StackedDrg, Tau,
-    TemporaryAux, TemporaryAuxCache,
+    TemporaryAux, TemporaryAuxCache, Labels,
 };
 use storage_proofs::proof::ProofScheme;
 use storage_proofs::sector::SectorId;
@@ -42,31 +43,20 @@ use crate::types::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub fn seal_pre_commit_phase1<R, S, T, Tree: 'static + MerkleTreeTrait>(
+pub fn generate_comm_d_tree<R, S, Tree: 'static + MerkleTreeTrait>(
     porep_config: PoRepConfig,
     cache_path: R,
     in_path: S,
-    out_path: T,
-    prover_id: ProverId,
-    sector_id: SectorId,
-    ticket: Ticket,
     piece_infos: &[PieceInfo],
-) -> Result<SealPreCommitPhase1Output<Tree>>
-where
-    R: AsRef<Path>,
-    S: AsRef<Path>,
-    T: AsRef<Path>,
+) -> Result<SealPreCommitPhase1Output<Tree>> // not really SealPreCommitPhase1Output, but only config and comm_d
+    where
+        R: AsRef<Path>,
+        S: AsRef<Path>,
 {
-    info!("seal_pre_commit_phase1:start: {:?}", sector_id);
-
     // Sanity check all input path types.
     ensure!(
         metadata(in_path.as_ref())?.is_file(),
         "in_path must be a file"
-    );
-    ensure!(
-        metadata(out_path.as_ref())?.is_file(),
-        "out_path must be a file"
     );
     ensure!(
         metadata(cache_path.as_ref())?.is_dir(),
@@ -77,31 +67,19 @@ where
     fs::metadata(&in_path)
         .with_context(|| format!("could not read in_path={:?})", in_path.as_ref().display()))?;
 
-    fs::metadata(&out_path)
-        .with_context(|| format!("could not read out_path={:?}", out_path.as_ref().display()))?;
-
-    // Copy unsealed data to output location, where it will be sealed in place.
-    fs::copy(&in_path, &out_path).with_context(|| {
-        format!(
-            "could not copy in_path={:?} to out_path={:?}",
-            in_path.as_ref().display(),
-            out_path.as_ref().display()
-        )
-    })?;
-
     let f_data = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&out_path)
-        .with_context(|| format!("could not open out_path={:?}", out_path.as_ref().display()))?;
+        .open(&in_path)
+        .with_context(|| format!("could not open in_path={:?}", in_path.as_ref().display()))?;
 
-    // Zero-pad the data to the requested size by extending the underlying file if needed.
+    // TODO
     f_data.set_len(sector_bytes as u64)?;
 
     let data = unsafe {
         MmapOptions::new()
-            .map_mut(&f_data)
-            .with_context(|| format!("could not mmap out_path={:?}", out_path.as_ref().display()))?
+            .map(&f_data)
+            .with_context(|| format!("could not mmap in_path={:?}", in_path.as_ref().display()))?
     };
 
     let compound_setup_params = compound_proof::SetupParams {
@@ -157,6 +135,158 @@ where
 
         Ok((config, comm_d))
     })?;
+
+    info!("verifying pieces");
+
+    ensure!(
+        verify_pieces(&comm_d, piece_infos, porep_config.into())?,
+        "pieces and comm_d do not match"
+    );
+
+    Ok(SealPreCommitPhase1Output {
+        labels: Labels::<Tree>::new(vec!{}),
+        config,
+        comm_d,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
+pub fn seal_pre_commit_phase1<R, S, T, Tree: 'static + MerkleTreeTrait>(
+    porep_config: PoRepConfig,
+    cache_path: R,
+    in_path: S,
+    out_path: T,
+    prover_id: ProverId,
+    sector_id: SectorId,
+    ticket: Ticket,
+    piece_infos: &[PieceInfo],
+) -> Result<SealPreCommitPhase1Output<Tree>>
+    where
+        R: AsRef<Path>,
+        S: AsRef<Path>,
+        T: AsRef<Path>,
+{
+    seal_pre_commit_phase1_with_comm_d(porep_config, cache_path, in_path, out_path, prover_id, sector_id, ticket, piece_infos, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn seal_pre_commit_phase1_with_comm_d<R, S, T, Tree: 'static + MerkleTreeTrait>(
+    porep_config: PoRepConfig,
+    cache_path: R,
+    in_path: S,
+    out_path: T,
+    prover_id: ProverId,
+    sector_id: SectorId,
+    ticket: Ticket,
+    piece_infos: &[PieceInfo],
+    phase1_output: Option<SealPreCommitPhase1Output<Tree>>, // not really SealPreCommitPhase1Output, but only config and comm_d
+) -> Result<SealPreCommitPhase1Output<Tree>>
+where
+    R: AsRef<Path>,
+    S: AsRef<Path>,
+    T: AsRef<Path>,
+{
+    info!("seal_pre_commit_phase1: start");
+
+    let sector_bytes = usize::from(PaddedBytesAmount::from(porep_config));
+    fs::metadata(&in_path)
+        .with_context(|| format!("could not read in_path={:?})", in_path.as_ref().display()))?;
+
+    fs::metadata(&out_path)
+        .with_context(|| format!("could not read out_path={:?}", out_path.as_ref().display()))?;
+
+    // Copy unsealed data to output location, where it will be sealed in place.
+    fs::copy(&in_path, &out_path).with_context(|| {
+        format!(
+            "could not copy in_path={:?} to out_path={:?}",
+            in_path.as_ref().display(),
+            out_path.as_ref().display()
+        )
+    })?;
+
+    let f_data = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&out_path)
+        .with_context(|| format!("could not open out_path={:?}", out_path.as_ref().display()))?;
+
+    // Zero-pad the data to the requested size by extending the underlying file if needed.
+    f_data.set_len(sector_bytes as u64)?;
+
+    let data = unsafe {
+        MmapOptions::new()
+            .map_mut(&f_data)
+            .with_context(|| format!("could not mmap out_path={:?}", out_path.as_ref().display()))?
+    };
+
+    let compound_setup_params = compound_proof::SetupParams {
+        vanilla_params: setup_params(
+            PaddedBytesAmount::from(porep_config),
+            usize::from(PoRepProofPartitions::from(porep_config)),
+            porep_config.porep_id,
+        )?,
+        partitions: Some(usize::from(PoRepProofPartitions::from(porep_config))),
+        priority: false,
+    };
+
+    let compound_public_params = <StackedCompound<Tree, DefaultPieceHasher> as CompoundProof<
+        StackedDrg<Tree, DefaultPieceHasher>,
+        _,
+    >>::setup(&compound_setup_params)?;
+
+    let (config, comm_d) = match phase1_output {
+        Some(phase1_output) => {
+            info!("using existing merkle tree");
+            let SealPreCommitPhase1Output {
+                mut config,
+                comm_d,
+                ..
+            } = phase1_output;
+            config.path = cache_path.as_ref().into();
+            (config, comm_d)
+        },
+        None => {
+            info!("building merkle tree for the original data");
+            measure_op(CommD, || -> Result<_> {
+                let base_tree_size = get_base_tree_size::<DefaultBinaryTree>(porep_config.sector_size)?;
+                let base_tree_leafs = get_base_tree_leafs::<DefaultBinaryTree>(base_tree_size)?;
+                ensure!(
+                    compound_public_params.vanilla_params.graph.size() == base_tree_leafs,
+                    "graph size and leaf size don't match"
+                );
+
+                trace!(
+                    "seal phase 1: sector_size {}, base tree size {}, base tree leafs {}",
+                    u64::from(porep_config.sector_size),
+                    base_tree_size,
+                    base_tree_leafs,
+                );
+
+                // MT for original data is always named tree-d, and it will be
+                // referenced later in the process as such.
+                let mut config = StoreConfig::new(
+                    cache_path.as_ref(),
+                    CacheKey::CommDTree.to_string(),
+                    default_rows_to_discard(base_tree_leafs, BINARY_ARITY),
+                );
+                let data_tree = create_base_merkle_tree::<BinaryMerkleTree<DefaultPieceHasher>>(
+                    Some(config.clone()),
+                    base_tree_leafs,
+                    &data,
+                )?;
+                drop(data);
+
+                config.size = Some(data_tree.len());
+                let comm_d_root: Fr = data_tree.root().into();
+                let comm_d = commitment_from_fr(comm_d_root);
+
+                drop(data_tree);
+
+                Ok((config, comm_d))
+            })?
+        }
+    };
 
     info!("verifying pieces");
 
