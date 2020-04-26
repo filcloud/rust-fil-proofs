@@ -31,6 +31,16 @@ pub trait ProofScheme<'a> {
         priv_in: &Self::PrivateInputs,
         partition_count: usize,
     ) -> Result<Vec<Self::Proof>> {
+        Self::prove_all_partitions_with_proofs(pub_params, pub_in, priv_in, partition_count, None)
+    }
+
+    fn prove_all_partitions_with_proofs(
+        pub_params: &Self::PublicParams,
+        pub_in: &Self::PublicInputs,
+        priv_in: &Self::PrivateInputs,
+        partition_count: usize,
+        proofs_str: Option<String>,
+    ) -> Result<Vec<Self::Proof>> {
         info!("groth_proof_count: {}", partition_count);
         info!("generating {} groth proofs.", partition_count);
 
@@ -55,6 +65,16 @@ pub trait ProofScheme<'a> {
         info!("total_groth_proof_time: {:?}", total_proof_time);
 
         result
+    }
+
+    fn tree_prove(
+        pub_params: &Self::PublicParams,
+        pub_in: &Self::PublicInputs,
+        priv_in: &Self::PrivateInputs,
+        ji: &[(usize, usize)],
+        num_sectors_per_chunk: usize,
+    ) -> Result<String> {
+        Ok(String::default())
     }
 
     /// verify returns true if the supplied proof is valid for the given public parameter and public inputs.

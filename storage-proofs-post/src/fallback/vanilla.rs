@@ -7,11 +7,13 @@ use byteorder::{ByteOrder, LittleEndian};
 use filecoin_hashers::{Domain, HashFunction, Hasher};
 use generic_array::typenum::Unsigned;
 use log::{error, trace};
+use log::warn;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use itertools::izip;
 use storage_proofs_core::{
     api_version::ApiVersion,
     error::{Error, Result},
@@ -249,6 +251,11 @@ pub fn generate_leaf_challenge_inner<T: Domain>(
     leaf_challenge % (pub_params.sector_size / NODE_SIZE as u64)
 }
 
+enum ProofOrFault<T> {
+    Proof(T),
+    Fault(SectorId),
+}
+
 // Generates a single vanilla proof, given the private inputs and sector challenges.
 pub fn vanilla_proof<Tree: MerkleTreeTrait>(
     sector_id: SectorId,
@@ -337,11 +344,12 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
         Ok(proofs[k].to_owned())
     }
 
-    fn prove_all_partitions<'b>(
+    fn prove_all_partitions_with_proofs<'b>(
         pub_params: &'b Self::PublicParams,
         pub_inputs: &'b Self::PublicInputs,
         priv_inputs: &'b Self::PrivateInputs,
         partition_count: usize,
+        proofs_str: Option<String>,
     ) -> Result<Vec<Self::Proof>> {
         ensure!(
             priv_inputs.sectors.len() == pub_inputs.sectors.len(),
@@ -365,6 +373,41 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
 
         // Use `BTreeSet` so failure result will be canonically ordered (sorted).
         let mut faulty_sectors = BTreeSet::new();
+
+        if proofs_str.is_some() {
+            let proof = proofs_str.unwrap();
+            let all_proofs: Vec<SectorProof<Tree::Proof>> = serde_json::from_str(&proof)?;
+            ensure!(
+                all_proofs.len() == pub_inputs.sectors.len(),
+                "inconsistent number of sectors and proofs {} != {}",
+                all_proofs.len(),
+                pub_inputs.sectors.len(),
+            );
+
+            for (j, pub_sectors_chunk) in pub_inputs
+                .sectors
+                .chunks(num_sectors_per_chunk)
+                .enumerate()
+            {
+                let mut proofs = Vec::with_capacity(num_sectors_per_chunk);
+
+                for (i, _) in pub_sectors_chunk
+                    .iter()
+                    .enumerate()
+                {
+                    let proof = &all_proofs[j * num_sectors_per_chunk + i];
+                    proofs.push((*proof).clone());
+                }
+
+                while proofs.len() < num_sectors_per_chunk {
+                    proofs.push(proofs[proofs.len() - 1].clone());
+                }
+
+                partition_proofs.push(Proof { sectors: proofs });
+            }
+
+            return Ok(partition_proofs);
+        }
 
         for (j, (pub_sectors_chunk, priv_sectors_chunk)) in pub_inputs
             .sectors
@@ -487,6 +530,105 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
             Ok(partition_proofs)
         } else {
             Err(Error::FaultySectors(faulty_sectors.into_iter().collect()).into())
+        }
+    }
+
+    fn tree_prove(
+        pub_params: &Self::PublicParams,
+        pub_in: &Self::PublicInputs,
+        priv_in: &Self::PrivateInputs,
+        ji: &[(usize, usize)],
+        num_sectors_per_chunk: usize,
+    ) -> Result<String> {
+        ensure!(
+            priv_in.sectors.len() == pub_in.sectors.len(),
+            "inconsistent number of private and public sectors {} != {}",
+            priv_in.sectors.len(),
+            pub_in.sectors.len(),
+        );
+
+        ensure!(
+            ji.len() == pub_in.sectors.len(),
+            "inconsistent number of ji and public sectors {} != {}",
+            ji.len(),
+            pub_in.sectors.len(),
+        );
+
+        let mut faulty_sectors = BTreeSet::new();
+        let mut proofs = Vec::<SectorProof::<Tree::Proof>>::new();
+
+        for (pub_sector, priv_sector, (j, i)) in izip!(pub_in.sectors, priv_in.sectors, ji) {
+            let tree = priv_sector.tree;
+            let sector_id = pub_sector.id;
+            let tree_leafs = tree.leafs();
+            let rows_to_discard = default_rows_to_discard(tree_leafs, Tree::Arity::to_usize());
+
+            trace!(
+                "Generating proof for tree leafs {} and arity {}",
+                tree_leafs,
+                Tree::Arity::to_usize(),
+            );
+
+            let mut inclusion_proofs = Vec::new();
+            for proof_or_fault in (0..pub_params.challenge_count)
+                .into_par_iter()
+                .map(|n| {
+                    let challenge_index = ((j * num_sectors_per_chunk + i)
+                        * pub_params.challenge_count
+                        + n) as u64;
+                    let challenged_leaf_start = generate_leaf_challenge(
+                        pub_params,
+                        pub_in.randomness,
+                        sector_id.into(),
+                        challenge_index,
+                    );
+
+                    let proof = tree.gen_cached_proof(
+                        challenged_leaf_start as usize,
+                        Some(rows_to_discard)
+                    );
+                    match proof {
+                        Ok(proof) => {
+                            if proof.validate(challenged_leaf_start as usize)
+                                && proof.root() == priv_sector.comm_r_last
+                            {
+                                Ok(ProofOrFault::Proof(proof))
+                            } else {
+                                Ok(ProofOrFault::Fault(sector_id))
+                            }
+                        }
+                        Err(_) => Ok(ProofOrFault::Fault(sector_id)),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+            {
+                match proof_or_fault {
+                    ProofOrFault::Proof(proof) => {
+                        inclusion_proofs.push(proof);
+                    }
+                    ProofOrFault::Fault(sector_id) => {
+                        faulty_sectors.insert(sector_id);
+                    }
+                }
+            }
+
+            let proof = SectorProof::<Tree::Proof> {
+                inclusion_proofs,
+                comm_c: priv_sector.comm_c,
+                comm_r_last: priv_sector.comm_r_last,
+            };
+            proofs.push(proof);
+        }
+
+        if faulty_sectors.is_empty() {
+            let proofs_str = serde_json::to_string(&proofs)?;
+            warn!("tree_prove: num {}, bytes {}", proofs.len(), proofs_str.len());
+            Ok(proofs_str)
+        } else {
+            let faulty_sectors = faulty_sectors.into_iter().collect::<Vec<SectorId>>();
+            let faulty_sectors_str = serde_json::to_string(&faulty_sectors)?;
+            warn!("tree_prove: num {}, bytes {}, faulty", faulty_sectors.len(), faulty_sectors_str.len());
+            Ok(faulty_sectors_str)
         }
     }
 

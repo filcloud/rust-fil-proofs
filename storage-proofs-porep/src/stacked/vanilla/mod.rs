@@ -18,6 +18,7 @@ mod porep;
 mod proof;
 mod proof_scheme;
 mod utils;
+mod gpu_selector;
 
 pub use challenges::{ChallengeRequirements, LayerChallenges};
 pub use column::Column;
