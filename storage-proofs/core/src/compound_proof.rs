@@ -70,17 +70,28 @@ where
         priv_in: &S::PrivateInputs,
         groth_params: &'b groth16::MappedParameters<Bls12>,
     ) -> Result<MultiProof<'b>> {
+        Self::prove_with_proofs(pub_params, pub_in, priv_in, groth_params, None)
+    }
+
+    fn prove_with_proofs<'b>(
+        pub_params: &PublicParams<'a, S>,
+        pub_in: &S::PublicInputs,
+        priv_in: &S::PrivateInputs,
+        groth_params: &'b groth16::MappedParameters<Bls12>,
+        proofs_str: Option<String>,
+    ) -> Result<MultiProof<'b>> {
         let partition_count = Self::partition_count(pub_params);
 
         // This will always run at least once, since there cannot be zero partitions.
         ensure!(partition_count > 0, "There must be partitions");
 
         info!("vanilla_proof:start");
-        let vanilla_proofs = S::prove_all_partitions(
+        let vanilla_proofs = S::prove_all_partitions_with_proofs(
             &pub_params.vanilla_params,
             &pub_in,
             priv_in,
             partition_count,
+            proofs_str,
         )?;
 
         info!("vanilla_proof:finish");
@@ -100,6 +111,16 @@ where
         info!("snark_proof:finish");
 
         Ok(MultiProof::new(groth_proofs, &groth_params.vk))
+    }
+
+    fn tree_prove<'b>(
+        pub_params: &PublicParams<'a, S>,
+        pub_in: &S::PublicInputs,
+        priv_in: &S::PrivateInputs,
+        ji: &[(usize, usize)],
+        num_sectors_per_chunk: usize,
+    ) -> Result<String> {
+        S::tree_prove(&pub_params.vanilla_params, pub_in, priv_in, ji, num_sectors_per_chunk)
     }
 
     // verify is equivalent to ProofScheme::verify.
