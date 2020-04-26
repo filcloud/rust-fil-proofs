@@ -79,6 +79,22 @@ impl Drop for Cleanup {
 }
 
 pub fn bind_core(core_index: CoreIndex) -> Result<Cleanup> {
+    let no_bind: bool = std::env::var("FIL_PROOFS_MULTICORE_SDR_NO_BIND_CORE").or::<std::env::VarError>(Ok(String::from("false")))
+        .and_then(|v| match v.parse() {
+            Ok(val) => Ok(val),
+            Err(_) => {
+                error!("Invalid FIL_PROOFS_MULTICORE_SDR_NO_BIND_CORE! Defaulting to false...");
+                Ok(false)
+            }
+        }).unwrap();
+    if no_bind {
+        debug!("multicore sdr no bind core");
+        return Ok(Cleanup {
+            tid: get_thread_id(),
+            prior_state: None,
+        });
+    }
+
     let child_topo = &TOPOLOGY;
     let tid = get_thread_id();
     let mut locked_topo = child_topo.lock().unwrap();
@@ -168,7 +184,7 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
             cache_count, group_count
         );
     } else {
-        debug!(
+        info!(
             "Cores: {}, Shared Caches: {}, cores per cache (group_size): {}",
             core_count, cache_count, group_size
         );
