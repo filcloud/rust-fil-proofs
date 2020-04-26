@@ -46,12 +46,14 @@ use super::{
 use ff::Field;
 use generic_array::{sequence::GenericSequence, GenericArray};
 use neptune::batch_hasher::BatcherType;
+use neptune::cl;
 use neptune::column_tree_builder::{ColumnTreeBuilder, ColumnTreeBuilderTrait};
 use neptune::tree_builder::{TreeBuilder, TreeBuilderTrait};
 use storage_proofs_core::fr32::fr_into_bytes;
 
 use crate::encode::{decode, encode};
 use crate::PoRep;
+use super::gpu_selector;
 
 pub const TOTAL_PARENTS: usize = 37;
 
@@ -351,7 +353,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             let layer_config =
                 StoreConfig::from_config(&config, CacheKey::label_layer(layer), Some(graph.size()));
 
-            info!("  storing labels on disk");
+            info!("  storing labels on disk with id {}", layer_config.id);
             // Construct and persist the layer data.
             let layer_store: DiskStore<<Tree::Hasher as Hasher>::Domain> =
                 DiskStore::new_from_slice_with_config(
@@ -557,7 +559,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             ColumnArity,
                         TreeArity,
                         >::new(
-                        Some(BatcherType::GPU),
+                        Some(BatcherType::CustomGPU(cl::GPUSelector::BusId(gpu_selector::get_gpu_index().unwrap()))),
                         nodes_count,
                         max_gpu_column_batch_size,
                         max_gpu_tree_batch_size,
@@ -826,7 +828,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                     let tree_r_last_config = &tree_r_last_config;
                     s.spawn(move |_| {
                         let mut tree_builder = TreeBuilder::<Tree::Arity>::new(
-                            Some(BatcherType::GPU),
+                            Some(BatcherType::CustomGPU(cl::GPUSelector::BusId(gpu_selector::get_gpu_index().unwrap()))),
                             nodes_count,
                             max_gpu_tree_batch_size,
                             tree_r_last_config.rows_to_discard,
@@ -1224,7 +1226,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 .max_gpu_tree_batch_size as usize;
 
             let mut tree_builder = TreeBuilder::<Tree::Arity>::new(
-                Some(BatcherType::GPU),
+                Some(BatcherType::CustomGPU(cl::GPUSelector::BusId(gpu_selector::get_gpu_index()?))),
                 nodes_count,
                 max_gpu_tree_batch_size,
                 tree_r_last_config.rows_to_discard,
