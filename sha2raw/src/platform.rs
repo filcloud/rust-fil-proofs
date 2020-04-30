@@ -1,5 +1,3 @@
-use raw_cpuid::CpuId;
-
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Platform {
@@ -41,11 +39,7 @@ impl Implementation {
     pub fn sha_if_supported() -> Option<Self> {
         // Use raw_cpuid instead of is_x86_feature_detected, to ensure the check
         // never happens at compile time.
-        let cpuid = CpuId::new();
-        let is_runtime_ok = cpuid
-            .get_extended_feature_info()
-            .map(|info| info.has_sha())
-            .unwrap_or_default();
+        let is_runtime_ok = false;
 
         #[cfg(target_feature = "sha")]
         {

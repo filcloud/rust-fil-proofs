@@ -125,10 +125,6 @@ fn prefetch(parents: &[u32], data: &[u8]) {
     for parent in parents {
         let start = *parent as usize * NODE_SIZE;
         let end = start + NODE_SIZE;
-
-        unsafe {
-            _mm_prefetch(data[start..end].as_ptr() as *const i8, _MM_HINT_T0);
-        }
     }
 }
 

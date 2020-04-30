@@ -26,10 +26,7 @@ pub fn pedersen(data: &[u8]) -> Fr {
 }
 
 pub fn pedersen_bits<'a, S: Iterator<Item = &'a [u8]>>(data: Bits<&'a [u8], S>) -> Fr {
-    let digest = if cfg!(target_arch = "x86_64") {
-        use fil_sapling_crypto::pedersen_hash::pedersen_hash_bls12_381_with_precomp;
-        pedersen_hash_bls12_381_with_precomp::<_>(Personalization::None, data, &JJ_PARAMS)
-    } else {
+    let digest = {
         use fil_sapling_crypto::pedersen_hash::pedersen_hash;
         pedersen_hash::<Bls12, _>(Personalization::None, data, &JJ_PARAMS)
     };
@@ -70,10 +67,7 @@ fn pedersen_compression_bits<T>(bits: T) -> FrRepr
 where
     T: IntoIterator<Item = bool>,
 {
-    let digest = if cfg!(target_arch = "x86_64") {
-        use fil_sapling_crypto::pedersen_hash::pedersen_hash_bls12_381_with_precomp;
-        pedersen_hash_bls12_381_with_precomp::<_>(Personalization::None, bits, &JJ_PARAMS)
-    } else {
+    let digest = {
         use fil_sapling_crypto::pedersen_hash::pedersen_hash;
         pedersen_hash::<Bls12, _>(Personalization::None, bits, &JJ_PARAMS)
     };

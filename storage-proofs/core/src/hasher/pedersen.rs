@@ -198,14 +198,7 @@ impl HashFunction<PedersenDomain> for PedersenFunction {
     fn hash2(a: &PedersenDomain, b: &PedersenDomain) -> PedersenDomain {
         let data = NodeBits::new(&(a.0).0[..], &(b.0).0[..]);
 
-        let digest = if cfg!(target_arch = "x86_64") {
-            use fil_sapling_crypto::pedersen_hash::pedersen_hash_bls12_381_with_precomp;
-            pedersen_hash_bls12_381_with_precomp::<_>(
-                Personalization::None,
-                data,
-                &pedersen::JJ_PARAMS,
-            )
-        } else {
+        let digest = {
             use fil_sapling_crypto::pedersen_hash::pedersen_hash;
             pedersen_hash::<Bls12, _>(Personalization::None, data, &pedersen::JJ_PARAMS)
         };
@@ -320,14 +313,7 @@ impl LightAlgorithm<PedersenDomain> for PedersenFunction {
     ) -> PedersenDomain {
         let node_bits = NodeBits::new(&(left.0).0[..], &(right.0).0[..]);
 
-        let digest = if cfg!(target_arch = "x86_64") {
-            use fil_sapling_crypto::pedersen_hash::pedersen_hash_bls12_381_with_precomp;
-            pedersen_hash_bls12_381_with_precomp::<_>(
-                Personalization::None,
-                node_bits,
-                &pedersen::JJ_PARAMS,
-            )
-        } else {
+        let digest = {
             use fil_sapling_crypto::pedersen_hash::pedersen_hash;
             pedersen_hash::<Bls12, _>(Personalization::None, node_bits, &pedersen::JJ_PARAMS)
         };

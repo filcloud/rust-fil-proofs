@@ -6,6 +6,5 @@ members = [
   "storage-proofs/core",
   "storage-proofs/porep",
   "storage-proofs/post",
-  "fil-proofs-tooling",
   "sha2raw"
 ]
