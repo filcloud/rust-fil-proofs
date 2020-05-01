@@ -12,6 +12,7 @@ mod sha256;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod sha256_intrinsics;
 mod sha256_utils;
+mod sha256_arm;
 
 pub use digest::Digest;
 pub use sha256::Sha256;

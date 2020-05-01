@@ -277,16 +277,16 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             Vec::with_capacity(layers);
         let mut label_configs: Vec<StoreConfig> = Vec::with_capacity(layers);
 
-        let layer_size = graph.size() * NODE_SIZE;
+        let layer_size = graph.size() * NODE_SIZE; // 1GB * 32
         // NOTE: this means we currently keep 2x sector size around, to improve speed.
-        let mut labels_buffer = vec![0u8; 2 * layer_size];
+        let mut labels_buffer = vec![0u8; 2 * layer_size]; // 2 * 32GB
 
         for layer in 1..=layers {
             info!("generating layer: {}", layer);
 
             if layer == 1 {
-                let layer_labels = &mut labels_buffer[..layer_size];
-                for node in 0..graph.size() {
+                let layer_labels = &mut labels_buffer[..layer_size]; // 前 32GB
+                for node in 0..graph.size() { // 0 .. 1GB
                     create_label(graph, replica_id, layer_labels, node)?;
                 }
             } else {

@@ -27,11 +27,15 @@ pub fn create_label<H: Hasher>(
     // hash parents for all non 0 nodes
     let hash = if node > 0 {
         // prefetch previous node, which is always a parent
+        // 每次预取前一个node
         let prev = &layer_labels[(node - 1) * NODE_SIZE..node * NODE_SIZE];
+        unsafe {
+            std::intrinsics::prefetch_read_data(prev.as_ptr() as *const i8, 3);
+        }
 
         graph.copy_parents_data(node as u32, &*layer_labels, hasher)
     } else {
-        hasher.finish()
+        hasher.finish() // node 为 0 时，立即结束哈希
     };
 
     // store the newly generated key
@@ -62,6 +66,9 @@ pub fn create_label_exp<H: Hasher>(
     let hash = if node > 0 {
         // prefetch previous node, which is always a parent
         let prev = &layer_labels[(node - 1) * NODE_SIZE..node * NODE_SIZE];
+        unsafe {
+            std::intrinsics::prefetch_read_data(prev.as_ptr() as *const i8, 3);
+        }
 
         graph.copy_parents_data_exp(node as u32, &*layer_labels, exp_parents_data, hasher)
     } else {

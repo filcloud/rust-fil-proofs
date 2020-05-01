@@ -125,6 +125,10 @@ fn prefetch(parents: &[u32], data: &[u8]) {
     for parent in parents {
         let start = *parent as usize * NODE_SIZE;
         let end = start + NODE_SIZE;
+
+        unsafe {
+            std::intrinsics::prefetch_read_data(data[start..end].as_ptr() as *const i8, 3);
+        }
     }
 }
 

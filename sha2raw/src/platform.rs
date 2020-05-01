@@ -6,6 +6,7 @@ enum Platform {
     Asm,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     Sha,
+    Arm,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -14,6 +15,11 @@ pub struct Implementation(Platform);
 impl Implementation {
     pub fn detect() -> Self {
         // Try the different implementations in order of how fast/modern they are.
+        {
+            if let Some(arm_impl) = Self::arm_if_supported() {
+                return arm_impl;
+            }
+        }
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             if let Some(sha_impl) = Self::sha_if_supported() {
@@ -61,6 +67,12 @@ impl Implementation {
         Some(Implementation(Platform::Asm))
     }
 
+    #[allow(unreachable_code)]
+    pub fn arm_if_supported() -> Option<Self> {
+        println!("WARN: arm sha2 available");
+        return Some(Implementation(Platform::Arm));
+    }
+
     #[inline]
     pub fn compress256(self, state: &mut [u32; 8], blocks: &[&[u8]]) {
         match self.0 {
@@ -81,6 +93,9 @@ impl Implementation {
                     buffer[32..].copy_from_slice(&block[1]);
                     sha2_asm::compress256(state, &buffer);
                 }
+            }
+            Platform::Arm => {
+                unsafe { crate::sha256_arm::compress256(state, blocks) };
             }
         }
     }
