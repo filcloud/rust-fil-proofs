@@ -15,6 +15,7 @@ use super::graph::StackedBucketGraph;
 pub fn create_label<H: Hasher>(
     graph: &StackedBucketGraph<H>,
     replica_id: &H::Domain,
+    layer_labels_cache: &[u8],
     layer_labels: &mut [u8],
     node: usize,
 ) -> Result<()> {
@@ -28,12 +29,12 @@ pub fn create_label<H: Hasher>(
     let hash = if node > 0 {
         // prefetch previous node, which is always a parent
         // 每次预取前一个node
-        let prev = &layer_labels[(node - 1) * NODE_SIZE..node * NODE_SIZE];
+        let prev = &layer_labels_cache[(node - 1) * NODE_SIZE..node * NODE_SIZE];
         unsafe {
             std::intrinsics::prefetch_read_data(prev.as_ptr() as *const i8, 3);
         }
 
-        graph.copy_parents_data(node as u32, &*layer_labels, hasher)
+        graph.copy_parents_data(node as u32, layer_labels_cache, hasher)
     } else {
         hasher.finish() // node 为 0 时，立即结束哈希
     };
@@ -53,6 +54,7 @@ pub fn create_label_exp<H: Hasher>(
     graph: &StackedBucketGraph<H>,
     replica_id: &H::Domain,
     exp_parents_data: &[u8],
+    layer_labels_cache: &[u8],
     layer_labels: &mut [u8],
     node: usize,
 ) -> Result<()> {
@@ -65,12 +67,12 @@ pub fn create_label_exp<H: Hasher>(
     // hash parents for all non 0 nodes
     let hash = if node > 0 {
         // prefetch previous node, which is always a parent
-        let prev = &layer_labels[(node - 1) * NODE_SIZE..node * NODE_SIZE];
+        let prev = &layer_labels_cache[(node - 1) * NODE_SIZE..node * NODE_SIZE];
         unsafe {
             std::intrinsics::prefetch_read_data(prev.as_ptr() as *const i8, 3);
         }
 
-        graph.copy_parents_data_exp(node as u32, &*layer_labels, exp_parents_data, hasher)
+        graph.copy_parents_data_exp(node as u32, layer_labels_cache, exp_parents_data, hasher)
     } else {
         hasher.finish()
     };
