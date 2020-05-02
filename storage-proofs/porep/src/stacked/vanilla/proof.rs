@@ -278,47 +278,82 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         let mut label_configs: Vec<StoreConfig> = Vec::with_capacity(layers);
 
         let layer_size = graph.size() * NODE_SIZE;
-        // NOTE: this means we currently keep 2x sector size around, to improve speed.
-        let mut labels_buffer = vec![0u8; 2 * layer_size];
+
+        // Split prefetch into 256 times. Minimum 4MiB.
+        let prefetch_size = std::cmp::max(graph.size() / 256, 1 << 22);
+        // Prefetch next next half size.
+        let prefetch_size = prefetch_size / 2;
+
+        let mut exp_layer_store: Option<DiskStore<<Tree::Hasher as Hasher>::Domain>> = None;
+        let mut exp_labels: Option<memmap::MmapMut> = None;
 
         for layer in 1..=layers {
             info!("generating layer: {}", layer);
 
-            if layer == 1 {
-                let layer_labels = &mut labels_buffer[..layer_size];
-                for node in 0..graph.size() {
-                    create_label(graph, replica_id, layer_labels, node)?;
-                }
-            } else {
-                let (layer_labels, exp_labels) = labels_buffer.split_at_mut(layer_size);
-                for node in 0..graph.size() {
-                    create_label_exp(graph, replica_id, exp_labels, layer_labels, node)?;
-                }
-            }
-
-            info!("  setting exp parents");
-            labels_buffer.copy_within(..layer_size, layer_size);
-
-            // Write the result to disk to avoid keeping it in memory all the time.
             let layer_config =
                 StoreConfig::from_config(&config, CacheKey::label_layer(layer), Some(graph.size()));
-
-            info!("  storing labels on disk");
-            // Construct and persist the layer data.
-            let layer_store: DiskStore<<Tree::Hasher as Hasher>::Domain> =
-                DiskStore::new_from_slice_with_config(
+            let layer_store =
+                DiskStore::new_for_mmap_with_config(
                     graph.size(),
                     Tree::Arity::to_usize(),
-                    &labels_buffer[..layer_size],
                     layer_config.clone(),
+                    layer_size,
                 )?;
+
+            let mut layer_labels = unsafe {
+                memmap::MmapOptions::new()
+                    .map_mut(&layer_store.file)?
+            };
+
+            let prefetch_nodes = |node: usize, layer_labels: &[u8], exp_labels: &[u8]| {
+                info!("prefetch_nodes {} begin", node);
+                super::prefetch_nodes(graph, layer_labels, exp_labels, node, prefetch_size).unwrap();
+                info!("prefetch_nodes {} end", node);
+            };
+
+            rayon::scope(|s| -> Result<()> {
+                info!("create_label for layer {} begin", layer);
+                let layer_labels = layer_labels.as_mut();
+                if layer == 1 {
+                    for node in 0..graph.size() {
+                        if node % prefetch_size == 0 {
+                            let layer_labels_shadow = unsafe { std::slice::from_raw_parts(layer_labels.as_ptr(), layer_labels.len()) };
+                            s.spawn(move |_| prefetch_nodes(node, layer_labels_shadow, &vec![0u8; 0]));
+                        }
+                        create_label(graph, replica_id, layer_labels, node)?;
+                    }
+                    // Unlock end part
+                    let layer_labels_shadow = unsafe { std::slice::from_raw_parts(layer_labels.as_ptr(), layer_labels.len()) };
+                    s.spawn(move |_| prefetch_nodes(graph.size(), layer_labels_shadow, &vec![0u8; 0]));
+                } else {
+                    let exp_labels = exp_labels.as_ref().unwrap().as_ref();
+                    for node in 0..graph.size() {
+                        if node % prefetch_size == 0 {
+                            let layer_labels_shadow = unsafe { std::slice::from_raw_parts(layer_labels.as_ptr(), layer_labels.len()) };
+                            s.spawn(move |_| prefetch_nodes(node, layer_labels_shadow, exp_labels));
+                        }
+                        create_label_exp(graph, replica_id, exp_labels, layer_labels, node)?;
+                    }
+                    // Unlock end part
+                    let layer_labels_shadow = unsafe { std::slice::from_raw_parts(layer_labels.as_ptr(), layer_labels.len()) };
+                    s.spawn(move |_| prefetch_nodes(graph.size(), layer_labels_shadow, exp_labels));
+                }
+                info!("create_label for layer {} end", layer);
+
+                Ok(())
+            })?;
+
+            info!("  setting exp parents");
+            exp_layer_store = Some(layer_store);
+            exp_labels = Some(layer_labels);
+
             info!(
                 "  generated layer {} store with id {}",
                 layer, layer_config.id
             );
 
             // Track the layer specific store and StoreConfig for later retrieval.
-            labels.push(layer_store);
+            labels.push(exp_layer_store.unwrap());
             label_configs.push(layer_config);
         }
 

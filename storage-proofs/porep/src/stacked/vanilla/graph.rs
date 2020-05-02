@@ -25,7 +25,7 @@ use storage_proofs_core::{
 pub const EXP_DEGREE: usize = 8;
 const FEISTEL_KEYS: [feistel::Index; 4] = [1, 2, 3, 4];
 
-const DEGREE: usize = BASE_DEGREE + EXP_DEGREE;
+pub const DEGREE: usize = BASE_DEGREE + EXP_DEGREE;
 
 /// Returns a reference to the parent cache, initializing it lazily the first time this is called.
 fn parent_cache<H, G>(cache_entries: u32, graph: &StackedGraph<H, G>) -> &'static ParentCache
@@ -40,7 +40,7 @@ where
 
 // StackedGraph will hold two different (but related) `ParentCache`,
 #[derive(Debug, Clone)]
-struct ParentCache {
+pub struct ParentCache {
     /// This is a large list of fixed (parent) sized arrays.
     /// `Vec<Vec<u32>>` was showing quite a large memory overhead, so this is layed out as a fixed boxed slice of memory.
     cache: Box<[u32]>,
@@ -98,7 +98,7 @@ where
     base_graph: G,
     feistel_precomputed: FeistelPrecomputed,
     id: String,
-    cache: Option<&'static ParentCache>,
+    pub cache: Option<&'static ParentCache>,
     _h: PhantomData<H>,
 }
 
@@ -121,7 +121,7 @@ where
 pub type StackedBucketGraph<H> = StackedGraph<H, BucketGraph<H>>;
 
 #[inline]
-fn prefetch(parents: &[u32], data: &[u8]) {
+pub fn prefetch(parents: &[u32], data: &[u8]) {
     for parent in parents {
         let start = *parent as usize * NODE_SIZE;
         let end = start + NODE_SIZE;
@@ -177,11 +177,13 @@ where
 
         if use_cache {
             info!("using parents cache of unlimited size");
+            /*
             assert_eq!(
                 nodes,
                 (32 * 1024 * 1024 * 1024) / NODE_SIZE,
                 "Cache is only available for 32GiB sectors"
             );
+            */
 
             let cache = parent_cache(nodes as u32, &res);
             res.cache = Some(cache);

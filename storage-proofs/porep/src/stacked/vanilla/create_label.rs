@@ -1,13 +1,17 @@
+use std::collections::{BTreeMap, HashMap};
+use std::iter::FromIterator;
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+use log::{info};
 use sha2raw::Sha256;
 use storage_proofs_core::{
     error::Result,
     hasher::Hasher,
     util::{data_at_node_offset, NODE_SIZE},
+    drgraph::Graph,
 };
 
 use super::graph::StackedBucketGraph;
@@ -82,5 +86,137 @@ pub fn create_label_exp<H: Hasher>(
     // strip last two bits, to ensure result is in Fr.
     layer_labels[end - 1] &= 0b0011_1111;
 
+    Ok(())
+}
+
+pub fn prefetch_nodes<H: Hasher>(
+    graph: &StackedBucketGraph<H>,
+    layer_labels: &[u8],
+    exp_parents_data: &[u8],
+    node: usize,
+    num: usize,
+) -> Result<()> {
+    let mut unlock_pages = HashMap::new();
+    let mut locked_pages = HashMap::new();
+    let mut lock_pages = HashMap::new();
+
+    // Unlock last part
+    let start = std::cmp::max(0, node as i64 - num as i64) as usize;
+    let end = node;
+    compute_pages(graph, layer_labels, exp_parents_data, start, end, &mut unlock_pages);
+
+    // Locked next part
+    let start = node;
+    let end = std::cmp::min(graph.size(), start + num);
+    compute_pages(graph, layer_labels, exp_parents_data, start, end, &mut locked_pages);
+
+    // Lock next next part
+    let start = std::cmp::min(graph.size(), node + num);
+    let end = std::cmp::min(graph.size(), start + num);
+    compute_pages(graph, layer_labels, exp_parents_data, start, end, &mut lock_pages);
+
+    for addr in locked_pages.keys() {
+        unlock_pages.remove(addr);
+    }
+    for addr in lock_pages.keys() {
+        unlock_pages.remove(addr);
+    }
+
+    if node == 0 {
+        // Lock first part
+        for (&addr, &size) in locked_pages.iter() {
+            lock_pages.insert(addr, size);
+        }
+    }
+
+    info!("munlock {} pages for {} nodes: begin", unlock_pages.len(), num);
+    let unlock_pages = BTreeMap::from_iter(unlock_pages);
+    munlock(&unlock_pages)?;
+    info!("munlock {} pages for {} nodes: end", unlock_pages.len(), num);
+
+    info!("mlock {} pages for {} nodes: begin", lock_pages.len(), num);
+    let lock_pages = BTreeMap::from_iter(lock_pages);
+    mlock(&lock_pages)?;
+    info!("mlock {} pages for {} nodes: end", lock_pages.len(), num);
+
+    Ok(())
+}
+
+fn compute_pages<H: Hasher>(
+    graph: &StackedBucketGraph<H>,
+    layer_labels: &[u8],
+    exp_parents_data: &[u8],
+    start_node: usize,
+    end_node: usize,
+    pages: &mut HashMap<usize, usize>,
+) {
+    info!("compute_pages: {} - {}", start_node, end_node);
+    for node in start_node..end_node {
+        if let Some(cache) = graph.cache {
+            let cache_parents = cache.read(node as u32);
+            compute_pages_inner(layer_labels, exp_parents_data, cache_parents, node, pages);
+        } else {
+            let mut cache_parents = [0u32; super::graph::DEGREE];
+            graph.parents(node as usize, &mut cache_parents[..]).unwrap();
+            compute_pages_inner(layer_labels, exp_parents_data, &cache_parents, node, pages);
+        }
+    }
+}
+
+fn compute_pages_inner(
+    layer_labels: &[u8],
+    exp_parents_data: &[u8],
+    parents: &[u32],
+    node: usize,
+    pages: &mut HashMap<usize, usize>,
+) {
+    build_pages(&[node as u32], layer_labels, pages);
+
+    build_pages(&parents[..storage_proofs_core::drgraph::BASE_DEGREE], layer_labels, pages);
+
+    if !exp_parents_data.is_empty() {
+        build_pages(&parents[storage_proofs_core::drgraph::BASE_DEGREE..], exp_parents_data, pages);
+    }
+}
+
+#[inline]
+fn build_pages(nodes: &[u32], data: &[u8], pages: &mut HashMap<usize, usize>) {
+    for node in nodes {
+        let start = *node as usize * NODE_SIZE;
+        let end = start + NODE_SIZE;
+        let data = &data[start..end];
+
+        let addr = region::page::floor(data.as_ptr() as usize);
+        let size = region::page::size_from_range(data.as_ptr(), data.len());
+        match pages.get(&addr) {
+            Some(&old_size) => {
+                if old_size < size {
+                    pages.insert(addr, size);
+                }
+            },
+            None => {
+                pages.insert(addr, size);
+            },
+        }
+    }
+}
+
+#[inline]
+fn mlock(pages: &BTreeMap<usize, usize>) -> Result<()> {
+    for (&addr, &size) in pages.iter() {
+        unsafe {
+            region::lock(addr as *const u8, size)?.release();
+        }
+    }
+    Ok(())
+}
+
+#[inline]
+fn munlock(pages: &BTreeMap<usize, usize>) -> Result<()> {
+    for (&addr, &size) in pages.iter() {
+        unsafe {
+            region::unlock(addr as *const u8, size)?;
+        }
+    }
     Ok(())
 }
