@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
@@ -124,7 +124,7 @@ pub fn prefetch_nodes<H: Hasher>(
 
     if node == 0 {
         // Lock first part
-        for (&addr, &size) in locked_pages.iter() {
+        for (addr, size) in locked_pages {
             lock_pages.insert(addr, size);
         }
     }
@@ -137,7 +137,12 @@ pub fn prefetch_nodes<H: Hasher>(
     info!("mlock {} pages for {} nodes: begin", lock_pages.len(), num);
     let lock_pages = BTreeMap::from_iter(lock_pages);
     mlock(&lock_pages)?;
-    info!("mlock {} pages for {} nodes: end", lock_pages.len(), num);
+    let mut total_nodes = 0usize;
+    for (&addr, size) in lock_pages.iter() {
+        println!("lock_pages: page {:p}, nodes {}", addr as *const u8, (*size).1.len());
+        total_nodes += (*size).1.len();
+    }
+    info!("mlock {} pages for {} nodes but actually {} nodes: end", lock_pages.len(), total_nodes, num);
 
     Ok(())
 }
@@ -148,7 +153,7 @@ fn compute_pages<H: Hasher>(
     exp_parents_data: &[u8],
     start_node: usize,
     end_node: usize,
-    pages: &mut HashMap<usize, usize>,
+    pages: &mut HashMap<usize, (usize, HashSet<usize>)>,
 ) {
     info!("compute_pages: {} - {}", start_node, end_node);
     for node in start_node..end_node {
@@ -168,7 +173,7 @@ fn compute_pages_inner(
     exp_parents_data: &[u8],
     parents: &[u32],
     node: usize,
-    pages: &mut HashMap<usize, usize>,
+    pages: &mut HashMap<usize, (usize, HashSet<usize>)>,
 ) {
     build_pages(&[node as u32], layer_labels, pages);
 
@@ -180,7 +185,7 @@ fn compute_pages_inner(
 }
 
 #[inline]
-fn build_pages(nodes: &[u32], data: &[u8], pages: &mut HashMap<usize, usize>) {
+fn build_pages(nodes: &[u32], data: &[u8], pages: &mut HashMap<usize, (usize, HashSet<usize>)>) {
     for node in nodes {
         let start = *node as usize * NODE_SIZE;
         let end = start + NODE_SIZE;
@@ -188,34 +193,36 @@ fn build_pages(nodes: &[u32], data: &[u8], pages: &mut HashMap<usize, usize>) {
 
         let addr = region::page::floor(data.as_ptr() as usize);
         let size = region::page::size_from_range(data.as_ptr(), data.len());
-        match pages.get(&addr) {
-            Some(&old_size) => {
-                if old_size < size {
-                    pages.insert(addr, size);
+        match pages.get_mut(&addr) {
+            Some(second) => {
+                let (ref mut ssize, ref mut count) = *second;
+                (*count).insert(start);
+                if *ssize < size {
+                    *ssize = size;
                 }
-            },
+            }
             None => {
-                pages.insert(addr, size);
+                pages.insert(addr, (size, HashSet::new()));
             },
         }
     }
 }
 
 #[inline]
-fn mlock(pages: &BTreeMap<usize, usize>) -> Result<()> {
-    for (&addr, &size) in pages.iter() {
+fn mlock(pages: &BTreeMap<usize, (usize, HashSet<usize>)>) -> Result<()> {
+    for (&addr, size) in pages {
         unsafe {
-            region::lock(addr as *const u8, size)?.release();
+            region::lock(addr as *const u8, (*size).0)?.release();
         }
     }
     Ok(())
 }
 
 #[inline]
-fn munlock(pages: &BTreeMap<usize, usize>) -> Result<()> {
-    for (&addr, &size) in pages.iter() {
+fn munlock(pages: &BTreeMap<usize, (usize, HashSet<usize>)>) -> Result<()> {
+    for (&addr, size) in pages {
         unsafe {
-            region::unlock(addr as *const u8, size)?;
+            region::unlock(addr as *const u8, (*size).0)?;
         }
     }
     Ok(())
