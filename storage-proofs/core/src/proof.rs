@@ -6,6 +6,8 @@ use serde::ser::Serialize;
 
 use crate::error::Result;
 
+pub type MerkleTreeProofCallback = fn(sector_id: u64, j: usize, i: usize, num_sectors_per_chunk: usize, randomness: *const libc::c_char, proof: *mut libc::c_char, proof_len: usize) -> usize;
+
 /// The ProofScheme trait provides the methods that any proof scheme needs to implement.
 pub trait ProofScheme<'a> {
     type PublicParams: Clone;
@@ -32,6 +34,16 @@ pub trait ProofScheme<'a> {
         priv_in: &Self::PrivateInputs,
         partition_count: usize,
     ) -> Result<Vec<Self::Proof>> {
+        Self::prove_all_partitions_with_callback(pub_params, pub_in, priv_in, partition_count, None)
+    }
+
+    fn prove_all_partitions_with_callback(
+        pub_params: &Self::PublicParams,
+        pub_in: &Self::PublicInputs,
+        priv_in: &Self::PrivateInputs,
+        partition_count: usize,
+        tree_cb: Option<MerkleTreeProofCallback>,
+    ) -> Result<Vec<Self::Proof>> {
         info!("groth_proof_count: {}", partition_count);
         info!("generating {} groth proofs.", partition_count);
         let start = Instant::now();
@@ -55,6 +67,17 @@ pub trait ProofScheme<'a> {
         info!("total_groth_proof_time: {:?}", total_proof_time);
 
         result
+    }
+
+    fn tree_prove(
+        pub_params: &Self::PublicParams,
+        pub_in: &Self::PublicInputs,
+        priv_in: &Self::PrivateInputs,
+        j: usize,
+        i: usize,
+        num_sectors_per_chunk: usize,
+    ) -> Result<String> {
+        Ok(String::default())
     }
 
     /// verify returns true if the supplied proof is valid for the given public parameter and public inputs.

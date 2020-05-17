@@ -106,7 +106,7 @@ where
     let base_tree_leafs = get_base_tree_leafs::<Tree>(base_tree_len)?;
     let mut trees = Vec::with_capacity(configs.len());
     for i in 0..configs.len() {
-        let mut store = if net_reader.empty {
+        let store = if !net_reader.readable() {
             let mut store = Tree::Store::new_with_config(
                 base_tree_len,
                 Tree::Arity::to_usize(),

@@ -18,6 +18,7 @@ use storage_proofs::merkle::{
 use storage_proofs::multi_proof::MultiProof;
 use storage_proofs::post::fallback;
 use storage_proofs::sector::*;
+pub use storage_proofs::proof::MerkleTreeProofCallback;
 
 use crate::api::util::{as_safe_commitment, get_base_tree_leafs, get_base_tree_size};
 use crate::caches::{get_post_params, get_post_verifying_key};
@@ -262,7 +263,7 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
-    generate_winning_post_with_reader(post_config, randomness, replicas, prover_id, NetReader::default())
+    generate_winning_post_with_reader(post_config, randomness, replicas, prover_id, NetReader::default(), None)
 }
 
 pub fn generate_winning_post_with_reader<Tree: 'static + MerkleTreeTrait>(
@@ -271,6 +272,7 @@ pub fn generate_winning_post_with_reader<Tree: 'static + MerkleTreeTrait>(
     replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
     prover_id: ProverId,
     net_reader: NetReader,
+    tree_cb: Option<MerkleTreeProofCallback>,
 ) -> Result<SnarkProof> {
     info!("generate_winning_post:start");
     ensure!(
@@ -300,25 +302,49 @@ pub fn generate_winning_post_with_reader<Tree: 'static + MerkleTreeTrait>(
         fallback::FallbackPoStCompound::setup(&setup_params)?;
     let groth_params = get_post_params::<Tree>(&post_config)?;
 
-    let trees = replicas
-        .iter()
-        .map(|(id, replica)| {
-            let mut net_reader = net_reader.clone();
-            net_reader.sector_id = u64::from(*id);
-            replica.merkle_tree(post_config.sector_size, net_reader)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut trees = Vec::new();
+    if tree_cb.is_none() {
+        trees = replicas
+            .iter()
+            .map(|(id, replica)| {
+                let mut net_reader = net_reader.clone();
+                net_reader.sector_id = u64::from(*id);
+                replica.merkle_tree(post_config.sector_size, net_reader)
+            })
+            .collect::<Result<_>>()?;
+    }
 
     let mut pub_sectors = Vec::with_capacity(param_sector_count);
     let mut priv_sectors = Vec::with_capacity(param_sector_count);
 
     for _ in 0..param_sector_count {
-        for ((id, replica), tree) in replicas.iter().zip(trees.iter()) {
+        for (i, (id, replica)) in replicas.iter().enumerate() {
             let comm_r = replica.safe_comm_r()?;
-            let mut net_reader = net_reader.clone();
-            let aux = replica.get_aux(net_reader, u64::from(*id))?;
-            let comm_c = aux.comm_c;
-            let comm_r_last = aux.comm_r_last;
+            let (comm_c, comm_r_last) = if tree_cb.is_some() {
+                let aux = PersistentAux::<<Tree::Hasher as Hasher>::Domain>::default(); // dummy
+                let comm_c = aux.comm_c;
+                let comm_r_last = aux.comm_r_last;
+                (comm_c, comm_r_last)
+            } else {
+                let net_reader = net_reader.clone();
+                let aux = replica.get_aux(net_reader, u64::from(*id))?;
+                let comm_c = aux.comm_c;
+                let comm_r_last = aux.comm_r_last;
+                (comm_c, comm_r_last)
+            };
+
+            let tree = if tree_cb.is_some() {
+                let tree = 0 as *const MerkleTreeWrapper<
+                    Tree::Hasher,
+                    Tree::Store,
+                    Tree::Arity,
+                    Tree::SubTreeArity,
+                    Tree::TopTreeArity,
+                >;
+                unsafe { &*tree }
+            } else {
+                &trees[i]
+            };
 
             pub_sectors.push(fallback::PublicSector::<<Tree::Hasher as Hasher>::Domain> {
                 id: *id,
@@ -343,17 +369,99 @@ pub fn generate_winning_post_with_reader<Tree: 'static + MerkleTreeTrait>(
         sectors: &priv_sectors,
     };
 
-    let proof = fallback::FallbackPoStCompound::<Tree>::prove(
+    let proof = fallback::FallbackPoStCompound::<Tree>::prove_with_callback(
         &pub_params,
         &pub_inputs,
         &priv_inputs,
         &groth_params,
+        tree_cb,
     )?;
     let proof = proof.to_vec()?;
 
     info!("generate_winning_post:finish");
 
     Ok(proof)
+}
+
+pub fn tree_prove<Tree: 'static + MerkleTreeTrait>(
+    post_config: &PoStConfig,
+    randomness: &ChallengeSeed,
+    replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
+    j: usize,
+    i: usize,
+    num_sectors_per_chunk: usize,
+) -> Result<String> {
+    ensure!(
+        post_config.typ == PoStType::Winning || post_config.typ == PoStType::Window,
+        "invalid post config type"
+    );
+
+    let randomness_safe: <Tree::Hasher as Hasher>::Domain =
+        as_safe_commitment(randomness, "randomness")?;
+    let dummy_prover_id = [0u8; 32];
+    let prover_id_safe: <Tree::Hasher as Hasher>::Domain =
+        as_safe_commitment(&dummy_prover_id, "prover_id")?;
+
+    let vanilla_params = if post_config.typ == PoStType::Winning {
+        winning_post_setup_params(&post_config)?
+    } else {
+        window_post_setup_params(&post_config)
+    };
+    let param_sector_count = vanilla_params.sector_count;
+
+    let setup_params = compound_proof::SetupParams {
+        vanilla_params,
+        partitions: None,
+        priority: post_config.priority,
+    };
+    let pub_params: compound_proof::PublicParams<fallback::FallbackPoSt<Tree>> =
+        fallback::FallbackPoStCompound::setup(&setup_params)?;
+
+    let trees = replicas
+        .iter()
+        .map(|(_, replica)| replica.merkle_tree(post_config.sector_size, NetReader::default()))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut pub_sectors = Vec::with_capacity(param_sector_count);
+    let mut priv_sectors = Vec::with_capacity(param_sector_count);
+
+    for _ in 0..param_sector_count {
+        for ((id, replica), tree) in replicas.iter().zip(trees.iter()) {
+            let comm_r = replica.safe_comm_r()?;
+            let comm_c = replica.safe_comm_c()?;
+            let comm_r_last = replica.safe_comm_r_last()?;
+
+            pub_sectors.push(fallback::PublicSector::<<Tree::Hasher as Hasher>::Domain> {
+                id: *id,
+                comm_r,
+            });
+            priv_sectors.push(fallback::PrivateSector {
+                tree,
+                comm_c,
+                comm_r_last,
+            });
+        }
+    }
+
+    let pub_inputs = fallback::PublicInputs::<<Tree::Hasher as Hasher>::Domain> {
+        randomness: randomness_safe,
+        prover_id: prover_id_safe,
+        sectors: &pub_sectors,
+        k: None,
+    };
+
+    let priv_inputs = fallback::PrivateInputs::<Tree> {
+        sectors: &priv_sectors,
+    };
+
+    fallback::FallbackPoStCompound::<Tree>::tree_prove(
+        &pub_params,
+        &pub_inputs,
+        &priv_inputs,
+        j,
+        i,
+        num_sectors_per_chunk,
+    )
 }
 
 /// Given some randomness and a the length of available sectors, generates the challenged sector.
@@ -470,7 +578,7 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &BTreeMap<SectorId, PrivateReplicaInfo<Tree>>,
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
-    generate_window_post_with_reader(post_config, randomness, replicas, prover_id, NetReader::default())
+    generate_window_post_with_reader(post_config, randomness, replicas, prover_id, NetReader::default(), None)
 }
 
 pub fn generate_window_post_with_reader<Tree: 'static + MerkleTreeTrait>(
@@ -479,6 +587,7 @@ pub fn generate_window_post_with_reader<Tree: 'static + MerkleTreeTrait>(
     replicas: &BTreeMap<SectorId, PrivateReplicaInfo<Tree>>,
     prover_id: ProverId,
     net_reader: NetReader,
+    tree_cb: Option<MerkleTreeProofCallback>,
 ) -> Result<SnarkProof> {
     info!("generate_window_post:start");
     ensure!(
@@ -503,24 +612,48 @@ pub fn generate_window_post_with_reader<Tree: 'static + MerkleTreeTrait>(
         fallback::FallbackPoStCompound::setup(&setup_params)?;
     let groth_params = get_post_params::<Tree>(&post_config)?;
 
-    let trees: Vec<_> = replicas
-        .iter()
-        .map(|(id, replica)| {
-            let mut net_reader = net_reader.clone();
-            net_reader.sector_id = u64::from(*id);
-            replica.merkle_tree(post_config.sector_size, net_reader)
-        })
-        .collect::<Result<_>>()?;
+    let mut trees = Vec::new();
+    if tree_cb.is_none() {
+        trees = replicas
+            .iter()
+            .map(|(id, replica)| {
+                let mut net_reader = net_reader.clone();
+                net_reader.sector_id = u64::from(*id);
+                replica.merkle_tree(post_config.sector_size, net_reader)
+            })
+            .collect::<Result<_>>()?;
+    }
 
     let mut pub_sectors = Vec::with_capacity(sector_count);
     let mut priv_sectors = Vec::with_capacity(sector_count);
 
-    for ((sector_id, replica), tree) in replicas.iter().zip(trees.iter()) {
+    for (i, (sector_id, replica)) in replicas.iter().enumerate() {
         let comm_r = replica.safe_comm_r()?;
-        let mut net_reader = net_reader.clone();
-        let aux = replica.get_aux(net_reader, u64::from(*sector_id))?;
-        let comm_c = aux.comm_c;
-        let comm_r_last = aux.comm_r_last;
+        let (comm_c, comm_r_last) = if tree_cb.is_some() {
+            let aux = PersistentAux::<<Tree::Hasher as Hasher>::Domain>::default(); // dummy
+            let comm_c = aux.comm_c;
+            let comm_r_last = aux.comm_r_last;
+            (comm_c, comm_r_last)
+        } else {
+            let net_reader = net_reader.clone();
+            let aux = replica.get_aux(net_reader, u64::from(*sector_id))?;
+            let comm_c = aux.comm_c;
+            let comm_r_last = aux.comm_r_last;
+            (comm_c, comm_r_last)
+        };
+
+        let tree = if tree_cb.is_some() {
+            let tree = 0 as *const MerkleTreeWrapper<
+                Tree::Hasher,
+                Tree::Store,
+                Tree::Arity,
+                Tree::SubTreeArity,
+                Tree::TopTreeArity,
+            >;
+            unsafe { &*tree }
+        } else {
+            &trees[i]
+        };
 
         pub_sectors.push(fallback::PublicSector {
             id: *sector_id,
@@ -544,11 +677,12 @@ pub fn generate_window_post_with_reader<Tree: 'static + MerkleTreeTrait>(
         sectors: &priv_sectors,
     };
 
-    let proof = fallback::FallbackPoStCompound::prove(
+    let proof = fallback::FallbackPoStCompound::prove_with_callback(
         &pub_params,
         &pub_inputs,
         &priv_inputs,
         &groth_params,
+        tree_cb,
     )?;
 
     info!("generate_window_post:finish");
