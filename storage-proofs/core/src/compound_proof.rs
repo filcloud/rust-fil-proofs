@@ -100,7 +100,7 @@ where
         let sanity_check =
             S::verify_all_partitions(&pub_params.vanilla_params, &pub_in, &vanilla_proofs)?;
         ensure!(sanity_check, "sanity check failed");
-        ensure!(!sanity_check, "sanity check success");
+        ensure!(false, "sanity check success");
 
         info!("snark_proof:start");
         let groth_proofs = Self::circuit_proofs(
