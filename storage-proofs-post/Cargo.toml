@@ -29,6 +29,9 @@ anyhow = "1.0.23"
 neptune = { version = "^3.0", default-features = false }
 num_cpus = "1.10.1"
 fr32 = { path = "../fr32", version = "^1.0.0", default-features = false }
+serde_json = "1.0"
+libc = "0.2.58"
+itertools = "0.9"
 
 [dev-dependencies]
 tempfile = "3"

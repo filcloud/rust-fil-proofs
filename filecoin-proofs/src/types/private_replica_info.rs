@@ -107,6 +107,18 @@ impl<Tree: 'static + MerkleTreeTrait> PrivateReplicaInfo<Tree> {
         })
     }
 
+    pub fn new_only_comm_r(comm_r: Commitment) -> Result<Self> {
+        ensure!(comm_r != [0; 32], "Invalid all zero commitment (comm_r)");
+
+        Ok(PrivateReplicaInfo {
+            replica: PathBuf::default(),
+            comm_r,
+            aux: PersistentAux::default(),
+            cache_dir: PathBuf::default(),
+            _t: Default::default(),
+        })
+    }
+
     pub fn cache_dir_path(&self) -> &Path {
         self.cache_dir.as_path()
     }

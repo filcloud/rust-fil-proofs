@@ -51,6 +51,9 @@ use crate::{
     PoRep,
 };
 
+use rust_gpu_tools::opencl::GPUSelector;
+use super::gpu_selector;
+
 pub const TOTAL_PARENTS: usize = 37;
 
 lazy_static! {
@@ -588,7 +591,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 s.spawn(move |_| {
                     let _gpu_lock = GPU_LOCK.lock().expect("failed to get gpu lock");
                     let mut column_tree_builder = ColumnTreeBuilder::<ColumnArity, TreeArity>::new(
-                        Some(BatcherType::OpenCL),
+                        Some(BatcherType::CustomOpenCL(GPUSelector::BusId(gpu_selector::get_gpu_index().unwrap()))),
                         nodes_count,
                         max_gpu_column_batch_size,
                         max_gpu_tree_batch_size,
@@ -962,7 +965,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             s.spawn(move |_| {
                 let _gpu_lock = GPU_LOCK.lock().expect("failed to get gpu lock");
                 let mut tree_builder = TreeBuilder::<Tree::Arity>::new(
-                    Some(BatcherType::OpenCL),
+                    Some(BatcherType::CustomOpenCL(GPUSelector::BusId(gpu_selector::get_gpu_index().unwrap()))),
                     nodes_count,
                     max_gpu_tree_batch_size,
                     tree_r_last_config.rows_to_discard,
@@ -1423,8 +1426,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
             let _gpu_lock = GPU_LOCK.lock().expect("failed to get gpu lock");
             let mut tree_builder = TreeBuilder::<Tree::Arity>::new(
-                #[cfg(feature = "gpu")]
-                Some(BatcherType::OpenCL),
+                Some(BatcherType::CustomOpenCL(GPUSelector::BusId(gpu_selector::get_gpu_index()?))),
                 nodes_count,
                 max_gpu_tree_batch_size,
                 tree_r_last_config.rows_to_discard,

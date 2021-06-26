@@ -99,6 +99,16 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &BTreeMap<SectorId, PrivateReplicaInfo<Tree>>,
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
+    generate_window_post_with_proofs(post_config, randomness, replicas, prover_id, None)
+}
+
+pub fn generate_window_post_with_proofs<Tree: 'static + MerkleTreeTrait>(
+    post_config: &PoStConfig,
+    randomness: &ChallengeSeed,
+    replicas: &BTreeMap<SectorId, PrivateReplicaInfo<Tree>>,
+    prover_id: ProverId,
+    proofs_str: Option<String>,
+) -> Result<SnarkProof> {
     info!("generate_window_post:start");
     ensure!(
         post_config.typ == PoStType::Window,
@@ -122,26 +132,50 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
         FallbackPoStCompound::setup(&setup_params)?;
     let groth_params = get_post_params::<Tree>(&post_config)?;
 
-    let trees: Vec<_> = replicas
-        .iter()
-        .map(|(sector_id, replica)| {
-            replica
-                .merkle_tree(post_config.sector_size)
-                .with_context(|| {
-                    format!("generate_window_post: merkle_tree failed: {:?}", sector_id)
-                })
-        })
-        .collect::<Result<_>>()?;
+    let mut trees = Vec::new();
+    if proofs_str.is_none() {
+        trees = replicas
+            .iter()
+            .map(|(sector_id, replica)| {
+                replica
+                    .merkle_tree(post_config.sector_size)
+                    .with_context(|| {
+                        format!("generate_window_post: merkle_tree failed: {:?}", sector_id)
+                    })
+            })
+            .collect::<Result<_>>()?;
+    }
 
     let mut pub_sectors = Vec::with_capacity(sector_count);
     let mut priv_sectors = Vec::with_capacity(sector_count);
 
-    for ((sector_id, replica), tree) in replicas.iter().zip(trees.iter()) {
+    for (i, (sector_id, replica)) in replicas.iter().enumerate() {
         let comm_r = replica.safe_comm_r().with_context(|| {
             format!("generate_window_post: safe_comm_r failed: {:?}", sector_id)
         })?;
-        let comm_c = replica.safe_comm_c();
-        let comm_r_last = replica.safe_comm_r_last();
+        let (comm_c, comm_r_last) = if proofs_str.is_some() {
+            let aux = storage_proofs_porep::stacked::PersistentAux::<<Tree::Hasher as Hasher>::Domain>::default(); // dummy
+            let comm_c = aux.comm_c;
+            let comm_r_last = aux.comm_r_last;
+            (comm_c, comm_r_last)
+        } else {
+            let comm_c = replica.safe_comm_c();
+            let comm_r_last = replica.safe_comm_r_last();
+            (comm_c, comm_r_last)
+        };
+
+        let tree = if proofs_str.is_some() {
+            let tree = 0 as *const storage_proofs_core::merkle::MerkleTreeWrapper<
+                Tree::Hasher,
+                Tree::Store,
+                Tree::Arity,
+                Tree::SubTreeArity,
+                Tree::TopTreeArity,
+            >;
+            unsafe { &*tree }
+        } else {
+            &trees[i]
+        };
 
         pub_sectors.push(PublicSector {
             id: *sector_id,
@@ -165,7 +199,7 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
         sectors: &priv_sectors,
     };
 
-    let proof = FallbackPoStCompound::prove(&pub_params, &pub_inputs, &priv_inputs, &groth_params)?;
+    let proof = FallbackPoStCompound::prove_with_proofs(&pub_params, &pub_inputs, &priv_inputs, &groth_params, proofs_str)?;
 
     info!("generate_window_post:finish");
 

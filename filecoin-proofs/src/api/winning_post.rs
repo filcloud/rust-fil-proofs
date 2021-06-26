@@ -101,6 +101,16 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
+    generate_winning_post_with_proofs(post_config, randomness, replicas, prover_id, None)
+}
+
+pub fn generate_winning_post_with_proofs<Tree: 'static + MerkleTreeTrait>(
+    post_config: &PoStConfig,
+    randomness: &ChallengeSeed,
+    replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
+    prover_id: ProverId,
+    proofs_str: Option<String>,
+) -> Result<SnarkProof> {
     info!("generate_winning_post:start");
     ensure!(
         post_config.typ == PoStType::Winning,
@@ -129,27 +139,51 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
         FallbackPoStCompound::setup(&setup_params)?;
     let groth_params = get_post_params::<Tree>(&post_config)?;
 
-    let trees = replicas
-        .iter()
-        .map(|(sector_id, replica)| {
-            replica
-                .merkle_tree(post_config.sector_size)
-                .with_context(|| {
-                    format!("generate_winning_post: merkle_tree failed: {:?}", sector_id)
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut trees = Vec::new();
+    if proofs_str.is_none() {
+        trees = replicas
+            .iter()
+            .map(|(sector_id, replica)| {
+                replica
+                    .merkle_tree(post_config.sector_size)
+                    .with_context(|| {
+                        format!("generate_winning_post: merkle_tree failed: {:?}", sector_id)
+                    })
+            })
+            .collect::<Result<_>>()?;
+    }
 
     let mut pub_sectors = Vec::with_capacity(param_sector_count);
     let mut priv_sectors = Vec::with_capacity(param_sector_count);
 
     for _ in 0..param_sector_count {
-        for ((sector_id, replica), tree) in replicas.iter().zip(trees.iter()) {
+        for (i, (sector_id, replica)) in replicas.iter().enumerate() {
             let comm_r = replica.safe_comm_r().with_context(|| {
                 format!("generate_winning_post: safe_comm_r failed: {:?}", sector_id)
             })?;
-            let comm_c = replica.safe_comm_c();
-            let comm_r_last = replica.safe_comm_r_last();
+            let (comm_c, comm_r_last) = if proofs_str.is_some() {
+                let aux = storage_proofs_porep::stacked::PersistentAux::<<Tree::Hasher as Hasher>::Domain>::default(); // dummy
+                let comm_c = aux.comm_c;
+                let comm_r_last = aux.comm_r_last;
+                (comm_c, comm_r_last)
+            } else {
+                let comm_c = replica.safe_comm_c();
+                let comm_r_last = replica.safe_comm_r_last();
+                (comm_c, comm_r_last)
+            };
+
+            let tree = if proofs_str.is_some() {
+                let tree = 0 as *const storage_proofs_core::merkle::MerkleTreeWrapper<
+                    Tree::Hasher,
+                    Tree::Store,
+                    Tree::Arity,
+                    Tree::SubTreeArity,
+                    Tree::TopTreeArity,
+                >;
+                unsafe { &*tree }
+            } else {
+                &trees[i]
+            };
 
             pub_sectors.push(PublicSector::<<Tree::Hasher as Hasher>::Domain> {
                 id: *sector_id,
@@ -175,12 +209,91 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     };
 
     let proof =
-        FallbackPoStCompound::<Tree>::prove(&pub_params, &pub_inputs, &priv_inputs, &groth_params)?;
+        FallbackPoStCompound::<Tree>::prove_with_proofs(&pub_params, &pub_inputs, &priv_inputs, &groth_params, proofs_str)?;
     let proof = proof.to_vec()?;
 
     info!("generate_winning_post:finish");
 
     Ok(proof)
+}
+
+pub fn tree_prove<Tree: 'static + MerkleTreeTrait>(
+    post_config: &PoStConfig,
+    randomness: &ChallengeSeed,
+    replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
+    ji: &[(usize, usize)],
+    num_sectors_per_chunk: usize,
+) -> Result<String> {
+    ensure!(
+        post_config.typ == PoStType::Winning || post_config.typ == PoStType::Window,
+        "invalid post config type"
+    );
+
+    let randomness_safe: <Tree::Hasher as Hasher>::Domain =
+        as_safe_commitment(randomness, "randomness")?;
+    let dummy_prover_id = [0u8; 32];
+    let prover_id_safe: <Tree::Hasher as Hasher>::Domain =
+        as_safe_commitment(&dummy_prover_id, "prover_id")?;
+
+    let mut partitions = None;
+    let vanilla_params = if post_config.typ == PoStType::Winning {
+        winning_post_setup_params(&post_config)?
+    } else {
+        partitions = crate::api::get_partitions_for_window_post(replicas.len(), &post_config);
+        crate::parameters::window_post_setup_params(&post_config)
+    };
+    let mut param_sector_count = vanilla_params.sector_count;
+
+    let setup_params = compound_proof::SetupParams {
+        vanilla_params,
+        partitions,
+        priority: post_config.priority,
+    };
+    let pub_params: compound_proof::PublicParams<'_, fallback::FallbackPoSt<'_, Tree>> =
+        fallback::FallbackPoStCompound::setup(&setup_params)?;
+
+    let trees = replicas
+        .iter()
+        .map(|(_, replica)| replica.merkle_tree(post_config.sector_size))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut pub_sectors = Vec::with_capacity(param_sector_count);
+    let mut priv_sectors = Vec::with_capacity(param_sector_count);
+
+    for ((id, replica), tree) in replicas.iter().zip(trees.iter()) {
+        let comm_r = replica.safe_comm_r()?;
+        let comm_c = replica.safe_comm_c();
+        let comm_r_last = replica.safe_comm_r_last();
+
+        pub_sectors.push(fallback::PublicSector::<<Tree::Hasher as Hasher>::Domain> {
+            id: *id,
+            comm_r,
+        });
+        priv_sectors.push(fallback::PrivateSector {
+            tree,
+            comm_c,
+            comm_r_last,
+        });
+    }
+
+    let pub_inputs = fallback::PublicInputs::<<Tree::Hasher as Hasher>::Domain> {
+        randomness: randomness_safe,
+        prover_id: prover_id_safe,
+        sectors: pub_sectors,
+        k: None,
+    };
+
+    let priv_inputs = fallback::PrivateInputs::<Tree> {
+        sectors: &priv_sectors,
+    };
+
+    fallback::FallbackPoStCompound::<Tree>::tree_prove(
+        &pub_params,
+        &pub_inputs,
+        &priv_inputs,
+        ji,
+        num_sectors_per_chunk,
+    )
 }
 
 /// Given some randomness and the length of available sectors, generates the challenged sector.

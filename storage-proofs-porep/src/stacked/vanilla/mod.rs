@@ -21,6 +21,7 @@ mod proof;
 mod proof_scheme;
 #[cfg(feature = "multicore-sdr")]
 mod utils;
+mod gpu_selector;
 
 pub use challenges::{ChallengeRequirements, LayerChallenges};
 pub use column::Column;
