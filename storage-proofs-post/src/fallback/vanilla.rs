@@ -570,6 +570,11 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
                 Tree::Arity::to_usize(),
             );
 
+            // avoid rehashing fixed inputs
+            let mut challenge_hasher = Sha256::new();
+            challenge_hasher.update(AsRef::<[u8]>::as_ref(&pub_in.randomness));
+            challenge_hasher.update(&u64::from(sector_id).to_le_bytes()[..]);
+
             let mut inclusion_proofs = Vec::new();
             for proof_or_fault in (0..pub_params.challenge_count)
                 .into_par_iter()
@@ -577,28 +582,33 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
                     let challenge_index = ((j * num_sectors_per_chunk + i)
                         * pub_params.challenge_count
                         + n) as u64;
-                    let challenged_leaf_start = generate_leaf_challenge(
+                    let challenged_leaf = generate_leaf_challenge_inner::<
+                        <Tree::Hasher as Hasher>::Domain,
+                    >(
+                        challenge_hasher.clone(),
                         pub_params,
-                        pub_in.randomness,
-                        sector_id.into(),
                         challenge_index,
                     );
 
                     let proof = tree.gen_cached_proof(
-                        challenged_leaf_start as usize,
+                        challenged_leaf as usize,
                         Some(rows_to_discard)
                     );
                     match proof {
                         Ok(proof) => {
-                            if proof.validate(challenged_leaf_start as usize)
+                            if proof.validate(challenged_leaf as usize)
                                 && proof.root() == priv_sector.comm_r_last
                             {
                                 Ok(ProofOrFault::Proof(proof))
                             } else {
+                                error!("faulty sector: {:?}", sector_id);
                                 Ok(ProofOrFault::Fault(sector_id))
                             }
                         }
-                        Err(_) => Ok(ProofOrFault::Fault(sector_id)),
+                        Err(err) => {
+                            error!("faulty sector: {:?} ({:?})", sector_id, err);
+                            Ok(ProofOrFault::Fault(sector_id))
+                        },
                     }
                 })
                 .collect::<Result<Vec<_>>>()?

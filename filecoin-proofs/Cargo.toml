@@ -50,7 +50,7 @@ failure = "0.1.7"
 tempfile = "3"
 
 [features]
-default = ["gpu", "pairing"]
+default = ["gpu", "pairing", "multicore-sdr"]
 cpu-profile = ["gperftools"]
 heap-profile = ["gperftools/heap"]
 simd = ["storage-proofs-core/simd"]
@@ -79,6 +79,7 @@ blst = [
     "filecoin-hashers/blst",
     "fr32/blst",
 ]
+multicore-sdr = ["storage-proofs-porep/multicore-sdr"]
 
 [[bench]]
 name = "preprocessing"
