@@ -142,6 +142,12 @@ fn get_core_by_index(topo: &Topology, index: CoreIndex) -> Result<&TopologyObjec
 fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
     let topo = TOPOLOGY.lock().expect("poisoned lock");
 
+    let numa_depth = topo.depth_for_type(&ObjectType::Machine);
+    let numa_count = match numa_depth {
+        Ok(depth) => topo.size_at_depth(depth) as usize,
+        Err(_) => 0,
+    };
+
     let core_depth = match topo.depth_or_below_for_type(&ObjectType::Core) {
         Ok(depth) => depth,
         Err(_) => return None,
@@ -187,7 +193,7 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
         );
     }
 
-    let core_groups = (0..group_count)
+    let mut core_groups = (0..group_count)
         .map(|i| {
             (0..group_size)
                 .map(|j| {
@@ -198,6 +204,16 @@ fn core_groups(cores_per_unit: usize) -> Option<Vec<Mutex<Vec<CoreIndex>>>> {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+
+    if let Ok(v) = std::env::var("FIL_PROOFS_MULTICORE_SDR_NUMA_NODE") {
+        if let Ok(numa_node) = v.parse::<usize>() {
+            info!("FIL_PROOFS_MULTICORE_SDR_NUMA_NODE is {} while we have {} numa nodes", numa_node, numa_count);
+            if numa_node < numa_count {
+                let numa_size = core_groups.len() / numa_count;
+                core_groups = Vec::from(&core_groups[numa_size * numa_node..numa_size * (numa_node + 1)]);
+            }
+        }
+    }
 
     Some(
         core_groups
@@ -228,6 +244,27 @@ mod tests {
         match (checkout1, checkout2) {
             (Some(c1), Some(c2)) => assert!(*c1 != *c2),
             _ => panic!("failed to get two checkouts"),
+        }
+    }
+
+    #[test]
+    fn test_bind_cores() {
+        fil_logger::init();
+
+        let mut handles = Vec::new();
+        let mut groups = Vec::new();
+        for (i, _) in CORE_GROUPS.as_ref().unwrap().iter().enumerate() {
+            let core_group = std::sync::Arc::new(checkout_core_group());
+
+            // When `_cleanup_handle` is dropped, the previous binding of thread will be restored.
+            let cleanup_handle = (*core_group).as_ref().map(|group| {
+                // This could fail, but we will ignore the error if so.
+                // It will be logged as a warning by `bind_core`.
+                debug!("binding core of group {:?} in main thread", group);
+                group.get(0).map(|core_index| bind_core(*core_index))
+            });
+            handles.push(cleanup_handle);
+            groups.push(core_group);
         }
     }
 }
